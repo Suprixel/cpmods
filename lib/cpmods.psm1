@@ -1,0 +1,2011 @@
+# cpmods core: game state, tracked install/remove, frameworks, Nexus API
+$ErrorActionPreference = 'Stop'
+
+$script:Root = Split-Path -Parent $PSScriptRoot
+$script:Cfg = [IO.File]::ReadAllText((Join-Path $script:Root 'config.json')) | ConvertFrom-Json
+$script:Game = $script:Cfg.gamePath
+$script:NexusGame = $script:Cfg.nexusGame
+$script:StateDir = Join-Path $script:Root 'state'
+$script:StateFile = Join-Path $script:StateDir 'mods.json'
+$script:SettingsFile = Join-Path $script:StateDir 'settings.json'
+$script:ServerFile = Join-Path $script:StateDir 'server.json'
+$script:KeyFile = Join-Path $script:StateDir 'nexus.key'
+$script:QueueFile = Join-Path $script:Root 'queue.json'
+$script:FwFile = Join-Path $script:Root 'frameworks.json'
+$script:DlDir = Join-Path $script:Root 'downloads'
+$script:BkDir = Join-Path $script:Root 'backup'
+$script:TmpDir = Join-Path $script:Root 'tmp'
+$script:LogFile = Join-Path $script:Root 'cpmods.log'
+$script:Known = @('archive', 'bin', 'r6', 'red4ext', 'engine', 'mods')
+$script:LogTag = 'cp'
+$script:Quiet = $false
+foreach ($d in $script:StateDir, $script:DlDir, $script:BkDir, $script:TmpDir) {
+    if (-not (Test-Path -LiteralPath $d)) { [void](New-Item -ItemType Directory -Path $d) }
+}
+
+#region basics
+function Set-CpContext([string]$Tag, [bool]$Quiet = $false) { $script:LogTag = $Tag; $script:Quiet = $Quiet }
+function Get-CpPaths { [ordered]@{ root = $script:Root; game = $script:Game; downloads = $script:DlDir; state = $script:StateDir; log = $script:LogFile } }
+
+function Write-Note([string]$Msg, [string]$Color = 'Gray') {
+    if (-not $script:Quiet) { Write-Host $Msg -ForegroundColor $Color }
+    $line = '{0:yyyy-MM-dd HH:mm:ss} [{1}] {2}{3}' -f (Get-Date), $script:LogTag, $Msg, [Environment]::NewLine
+    for ($i = 0; $i -lt 8; $i++) { try { [IO.File]::AppendAllText($script:LogFile, $line); break } catch { Start-Sleep -Milliseconds 40 } }
+}
+
+function Get-SafeName([string]$N) { $N -replace '[^\w\-. ]', '_' }
+function Get-SafeFileName([string]$N) {
+    $bad = [IO.Path]::GetInvalidFileNameChars()
+    -join ("$N".ToCharArray() | ForEach-Object { if ($bad -contains $_) { '_' } else { $_ } })
+}
+function Get-NormName([string]$N) { ("$N".ToLower() -replace '\bv?\d+(\.\d+)+[a-z]?\b', ' ' -replace '[^a-z0-9]+', ' ').Trim() }
+
+function Read-JsonFile([string]$Path) {
+    for ($i = 0; ; $i++) {
+        try { return ([IO.File]::ReadAllText($Path) | ConvertFrom-Json -AsHashtable) }
+        catch [IO.IOException] { if ($i -ge 20) { throw }; Start-Sleep -Milliseconds 50 }
+    }
+}
+
+# Atomic replace so concurrent readers never see a half-written file
+function Write-JsonFile([string]$Path, $Obj) {
+    $tmp = '{0}.{1}.{2}.tmp' -f $Path, $PID, [Threading.Thread]::CurrentThread.ManagedThreadId
+    [IO.File]::WriteAllText($tmp, (ConvertTo-Json -InputObject $Obj -Depth 12), [Text.UTF8Encoding]::new($false))
+    for ($i = 0; ; $i++) {
+        try { [IO.File]::Move($tmp, $Path, $true); return }
+        catch { if ($i -ge 40) { Remove-Item -LiteralPath $tmp -Force -ErrorAction SilentlyContinue; throw }; Start-Sleep -Milliseconds 50 }
+    }
+}
+
+# Cross-process lock shared by CLI, nxm handler and server jobs
+function Use-Lock([scriptblock]$Body) {
+    $mtx = [Threading.Mutex]::new($false, 'Local\cpmods')
+    try { [void]$mtx.WaitOne() } catch [Threading.AbandonedMutexException] { }
+    try { & $Body } finally { $mtx.ReleaseMutex(); $mtx.Dispose() }
+}
+
+# first entry (full path) of a folder, or $null. Get-ChildItem | Select-Object -First 1 leaves its listing open
+# until .NET cleans up, and an open listing stops Windows from moving the folder
+function Get-FirstEntry([string]$Path, [string]$Filter = '*', [switch]$Recurse, [switch]$File) {
+    if (-not [IO.Directory]::Exists($Path)) { return $null }
+    $o = [IO.EnumerationOptions]::new(); $o.RecurseSubdirectories = [bool]$Recurse; $o.AttributesToSkip = 0
+    # assigned per branch: $( ) or an if-expression would make PowerShell run the whole listing
+    if ($File) { $en = [IO.Directory]::EnumerateFiles($Path, $Filter, $o) } else { $en = [IO.Directory]::EnumerateFileSystemEntries($Path, $Filter, $o) }
+    $e = $en.GetEnumerator()
+    try { if ($e.MoveNext()) { $e.Current } else { $null } } finally { $e.Dispose() }
+}
+
+function Get-7z {
+    $c = Get-Command 7z -ErrorAction SilentlyContinue
+    if ($c) { return $c.Source }
+    foreach ($p in "$env:ProgramFiles\7-Zip\7z.exe", "${env:ProgramFiles(x86)}\7-Zip\7z.exe") { if (Test-Path -LiteralPath $p) { return $p } }
+    $null
+}
+
+# 7-Zip when available; plain .zip also works without it
+function Expand-ModArchive([string]$Archive, [string]$Dest) {
+    $z = Get-7z
+    if ($z) {
+        $o = & $z x -y "-o$Dest" -- $Archive 2>&1
+        if ($LASTEXITCODE -ne 0) { throw "Extraction failed ($LASTEXITCODE): $(($o | Select-Object -Last 3) -join ' ')" }
+        return
+    }
+    if ([IO.Path]::GetExtension($Archive) -ieq '.zip') { Expand-Archive -LiteralPath $Archive -DestinationPath $Dest -Force; return }
+    throw "This mod is a $([IO.Path]::GetExtension($Archive)) archive and needs 7-Zip: winget install 7zip.7zip"
+}
+
+function Get-ArchiveEntries([string]$Archive) {
+    $z = Get-7z
+    if ($z) {
+        $lines = & $z l -slt -- $Archive 2>&1
+        if ($LASTEXITCODE -ne 0) { throw "Cannot read archive: $Archive" }
+        return @($lines | ForEach-Object { if ("$_" -match '^Path = (.+)$') { $Matches[1] } } | Select-Object -Skip 1)
+    }
+    if ([IO.Path]::GetExtension($Archive) -ieq '.zip') {
+        $zf = [IO.Compression.ZipFile]::OpenRead($Archive)
+        try { return @($zf.Entries | ForEach-Object { $_.FullName.TrimEnd('/') -replace '/', '\' }) } finally { $zf.Dispose() }
+    }
+    throw '7-Zip is required to read this archive'
+}
+#endregion
+
+#region settings / state / queue
+function Get-CpSettings {
+    $s = [ordered]@{ patchLabel = '2.5'; patchDate = '2026-10-22'; autoInstall = $true; autoNext = $true; browser = ''; uiChannel = 'release'; launchMode = 'steam'; reportOnExit = $true; warnRisk = $true
+        askOverwrite = $true; saveBackup = $true; saveKeep = 5; autoRestore = $true
+    }
+    if (Test-Path -LiteralPath $script:SettingsFile) {
+        $j = Read-JsonFile $script:SettingsFile
+        foreach ($k in @($j.Keys)) { if ($s.Contains($k)) { $s[$k] = $j[$k] } }
+    }
+    $dt = [datetime]::ParseExact("$($s.patchDate)", 'yyyy-MM-dd', [Globalization.CultureInfo]::InvariantCulture)
+    $s.patchEpoch = [DateTimeOffset]::new($dt, [TimeSpan]::Zero).ToUnixTimeSeconds()
+    $s
+}
+
+function Save-CpSettings($Changes) {
+    $cur = Get-CpSettings
+    $cur.Remove('patchEpoch')
+    foreach ($k in @($Changes.Keys)) {
+        if (-not $cur.Contains($k)) { continue }
+        $v = $Changes[$k]
+        if ($k -eq 'patchDate') { [void][datetime]::ParseExact("$v", 'yyyy-MM-dd', [Globalization.CultureInfo]::InvariantCulture); $v = "$v" }
+        elseif ($k -in 'autoInstall', 'autoNext', 'reportOnExit', 'warnRisk', 'askOverwrite', 'saveBackup', 'autoRestore') { $v = [bool]$v }
+        elseif ($k -eq 'uiChannel') { $v = "$v"; if ($v -notin 'release', 'beta') { throw 'uiChannel must be release or beta' } }
+        elseif ($k -eq 'saveKeep') { $v = [int]$v; if ($v -lt 1 -or $v -gt 30) { throw 'saveKeep must be 1 to 30' } }
+        elseif ($k -eq 'launchMode') { $v = "$v"; if ($v -notin 'steam', 'direct') { throw 'launchMode must be steam or direct' } }
+        elseif ($k -eq 'browser') { $v = "$v".Trim(); if ($v -and -not (Test-Path -LiteralPath $v -PathType Leaf)) { throw "Browser not found: $v" } }
+        else { $v = "$v".Trim(); if (-not $v) { continue } }
+        $cur[$k] = $v
+    }
+    Write-JsonFile $script:SettingsFile $cur
+    Get-CpSettings
+}
+
+function Get-Frameworks { @(Read-JsonFile $script:FwFile) }
+
+function Get-State {
+    $s = if (Test-Path -LiteralPath $script:StateFile) { Read-JsonFile $script:StateFile } else { $null }
+    if ($null -eq $s) { $s = [ordered]@{} }
+    foreach ($k in 'mods', 'pending', 'failed', 'disabled') {
+        $s[$k] = [Collections.Generic.List[object]]::new([object[]]@($s[$k] | Where-Object { $_ }))
+    }
+    $fws = $null
+    foreach ($m in $s.mods) {
+        if (-not $m.modId -and "$($m.source)".StartsWith('github:')) {
+            if (-not $fws) { $fws = Get-Frameworks }
+            $f = $fws | Where-Object { "github:$($_.repo)" -eq $m.source } | Select-Object -First 1
+            if ($f -and $f.nexusId) { $m.modId = [int]$f.nexusId }
+        }
+    }
+    $s
+}
+function Save-State($S) { Write-JsonFile $script:StateFile $S }
+
+function Get-Queue { if (Test-Path -LiteralPath $script:QueueFile) { @(Read-JsonFile $script:QueueFile | Where-Object { $_ }) } else { @() } }
+function Save-Queue($Q) { Write-JsonFile $script:QueueFile @($Q) }
+
+function Get-NexusPageUrl([int]$ModId, [int]$FileId) { "https://www.nexusmods.com/$($script:NexusGame)/mods/$ModId`?tab=files&file_id=$FileId&nmm=1" }
+
+# Marks a queue entry done; returns $true when it was an open queue item
+function Set-QueueItemDone([int]$ModId, [int]$FileId) {
+    Use-Lock {
+        $q = Get-Queue
+        $hit = $false
+        foreach ($x in $q) { if ([int]$x.modId -eq $ModId -and [int]$x.fileId -eq $FileId -and -not $x.done) { $x.done = $true; $hit = $true } }
+        if ($hit) { Save-Queue $q }
+        $hit
+    }
+}
+
+function Open-NextQueue {
+    $n = Get-Queue | Where-Object { -not $_.done } | Select-Object -First 1
+    if (-not $n) { return $null }
+    [void](Open-UrlInFront (Get-NexusPageUrl ([int]$n.modId) ([int]$n.fileId)))
+    Write-Note "Opened download page: $($n.name)"
+    $n
+}
+#endregion
+
+#region game
+# The game plus the helpers it leaves behind (launcher, crash reporter); any of them keeps Steam on "Running"
+$script:GameProcs = 'Cyberpunk2077', 'REDEngineErrorReporter', 'REDprelauncher'
+function Get-GameProcesses { @(Get-Process -Name $script:GameProcs -ErrorAction SilentlyContinue) }
+
+function Get-GameState {
+    $exe = Join-Path $script:Game 'bin\x64\Cyberpunk2077.exe'
+    $man = if ($script:Cfg.steamManifest -and (Test-Path -LiteralPath $script:Cfg.steamManifest)) { [IO.File]::ReadAllText($script:Cfg.steamManifest) } else { '' }
+    $flags = 0
+    [void][int]::TryParse([regex]::Match($man, '"StateFlags"\s+"(\d+)"').Groups[1].Value, [ref]$flags)
+    $build = [regex]::Match($man, '"buildid"\s+"(\d+)"').Groups[1].Value
+    $target = [regex]::Match($man, '"TargetBuildID"\s+"(\d+)"').Groups[1].Value
+    $vi = if (Test-Path -LiteralPath $exe) { (Get-Item -LiteralPath $exe).VersionInfo } else { $null }
+    $procs = @(Get-GameProcesses | ForEach-Object { $_.ProcessName } | Sort-Object -Unique)
+    [ordered]@{
+        version       = $(if ($vi) { $vi.ProductVersion } else { $null })
+        fileVersion   = $(if ($vi) { $vi.FileVersion } else { $null })
+        build         = $build
+        target        = $target
+        updatePending = (($flags -band 2) -ne 0) -or ($target -and $target -ne '0' -and $target -ne $build)
+        running       = $procs -contains 'Cyberpunk2077'
+        procs         = $procs
+        missing       = -not $vi
+    }
+}
+
+# Force-closes the game and its launcher/crash reporter; waits until they are gone
+function Stop-GameProcesses {
+    $ps = @(Get-GameProcesses)
+    $names = @($ps | ForEach-Object { $_.ProcessName } | Sort-Object -Unique)
+    foreach ($p in $ps) { try { $p.Kill() } catch { Write-Note "Could not close $($p.ProcessName) (pid $($p.Id)): $($_.Exception.Message)" } }
+    $sw = [Diagnostics.Stopwatch]::StartNew()
+    while ((Get-GameProcesses).Count -and $sw.ElapsedMilliseconds -lt 8000) { Start-Sleep -Milliseconds 250 }
+    $left = @(Get-GameProcesses | ForEach-Object { $_.ProcessName } | Sort-Object -Unique)
+    if ($names) { Write-Note "Force-closed $($names -join ', ')$(if ($left) { "; still open: $($left -join ', ')" })" }
+    [ordered]@{ stopped = $names; left = $left }
+}
+
+function Assert-GameReady([switch]$Force) {
+    $g = Get-GameState
+    if ($g.running) { throw 'Cyberpunk is running; close the game first' }
+    if ($g.updatePending -and -not $Force) { throw "Steam update pending (build $($g.build) -> $($g.target)); update the game first" }
+    if (Test-Path -LiteralPath (Join-Path $script:StateDir 'vanilla.json')) { throw 'Your mods are set aside for a launch without mods. Bring them back first.' }
+}
+
+function Test-AskOverwrite { [bool](Get-CpSettings).askOverwrite }
+#endregion
+
+#region install / remove
+# Where each file of a mod goes in the game folder, from its paths inside the archive (relative, "\").
+# The one rule for both the install (extracted files) and the Downloads preview (archive listing).
+function Get-LayoutPlan([string[]]$Paths, [string]$ModName) {
+    $r = [ordered]@{ files = [Collections.Generic.List[object]]::new(); skipped = [Collections.Generic.List[string]]::new(); variants = @(); fomod = $false }
+    if ($Paths | Where-Object { $_ -match '(^|\\)fomod\\ModuleConfig\.xml$' }) { $r.fomod = $true; return $r }
+    # folders holding a game root folder (archive, bin, r6...): '' = the archive's top
+    $cands = @{}
+    foreach ($p in $Paths) {
+        $parts = $p -split '\\'
+        for ($i = 0; $i -lt $parts.Count - 1; $i++) { if ($script:Known -contains $parts[$i]) { $cands[$(if ($i -eq 0) { '' } else { $parts[0..($i - 1)] -join '\' })] = $true } }
+    }
+    if ($cands.Count) {
+        $depth = @{}; foreach ($k in $cands.Keys) { $depth[$k] = if ($k) { ($k -split '\\').Count } else { 0 } }
+        $min = ($depth.Values | Measure-Object -Minimum).Minimum
+        $top = @($cands.Keys | Where-Object { $depth[$_] -eq $min } | Sort-Object)
+        if ($top.Count -gt 1) { $r.variants = $top; return $r }
+        $pre = if ($top[0]) { $top[0] + '\' } else { '' }
+        foreach ($p in $Paths) {
+            $rel = if (-not $pre) { $p } elseif ($p.StartsWith($pre, [StringComparison]::OrdinalIgnoreCase)) { $p.Substring($pre.Length) } else { '' }
+            if ($rel.Contains('\') -and $script:Known -contains ($rel -split '\\')[0]) { $r.files.Add(@{ From = $p; Rel = $rel }) } else { $r.skipped.Add($p) }
+        }
+        return $r
+    }
+    $safe = Get-SafeName $ModName
+    $cet = $Paths | Where-Object { [IO.Path]::GetFileName($_) -ieq 'init.lua' } | Sort-Object Length | Select-Object -First 1
+    $cetDir = if ($cet) { [IO.Path]::GetDirectoryName($cet) } else { '' }
+    # init.lua at the archive's top: the CET folder is named after the mod
+    $cetName = if ($cetDir) { [IO.Path]::GetFileName($cetDir) } else { $safe }
+    foreach ($p in $Paths) {
+        $ext = [IO.Path]::GetExtension($p).ToLower()
+        if ($cet -and (-not $cetDir -or $p.StartsWith("$cetDir\", [StringComparison]::OrdinalIgnoreCase))) {
+            $rel = "bin\x64\plugins\cyber_engine_tweaks\mods\$cetName\" + $(if ($cetDir) { $p.Substring($cetDir.Length + 1) } else { $p })
+        }
+        elseif ($ext -in '.archive', '.xl', '.archivexl') { $rel = "archive\pc\mod\$([IO.Path]::GetFileName($p))" }
+        elseif ($ext -eq '.reds') { $rel = "r6\scripts\$safe\$p" }
+        elseif ($ext -in '.yaml', '.yml') { $rel = "r6\tweaks\$safe\$p" }
+        else { $r.skipped.Add($p); continue }
+        $r.files.Add(@{ From = $p; Rel = $rel })
+    }
+    $r
+}
+
+# Maps extracted files to game-relative paths; throws on FOMOD or ambiguous variants
+function Get-ModLayout([string]$Dir, [string]$ModName) {
+    $plan = Get-LayoutPlan @(Get-ChildItem -LiteralPath $Dir -Recurse -File | ForEach-Object { [IO.Path]::GetRelativePath($Dir, $_.FullName) }) $ModName
+    if ($plan.fomod) { throw 'FOMOD installer: pick an option folder' }
+    if ($plan.variants) { throw ('Multiple variants, pick one: ' + (($plan.variants | ForEach-Object { if ($_) { $_ } else { '.' } }) -join ' | ')) }
+    foreach ($p in $plan.skipped) { Write-Note "  skip $p" DarkGray }
+    if (-not $plan.files.Count) { throw 'Unrecognized archive layout' }
+    $map = [Collections.Generic.List[object]]::new()
+    foreach ($f in $plan.files) { $map.Add(@{ Src = (Join-Path $Dir $f.From); Rel = $f.Rel }) }
+    , $map
+}
+
+# Adopted mods have no archive to reinstall from, so their files go to the Recycle Bin
+function Remove-ToRecycleBin([string]$Path, [switch]$Directory) {
+    Add-Type -AssemblyName Microsoft.VisualBasic
+    $ui = [Microsoft.VisualBasic.FileIO.UIOption]::OnlyErrorDialogs
+    $rc = [Microsoft.VisualBasic.FileIO.RecycleOption]::SendToRecycleBin
+    if ($Directory) { [Microsoft.VisualBasic.FileIO.FileSystem]::DeleteDirectory($Path, $ui, $rc) }
+    else { [Microsoft.VisualBasic.FileIO.FileSystem]::DeleteFile($Path, $ui, $rc) }
+}
+
+# Copies a mod's own version of some files back from its download; returns the files restored
+function Restore-ModFiles($Mod, [string[]]$Rels, [string]$To = $script:Game) {
+    if (-not $Rels -or -not $Mod -or -not $Mod.archive -or -not (Test-Path -LiteralPath $Mod.archive)) { return @() }
+    $tmp = Join-Path $script:TmpDir ([guid]::NewGuid().ToString('N'))
+    [void](New-Item -ItemType Directory -Path $tmp)
+    try {
+        Expand-ModArchive $Mod.archive $tmp
+        $map = Get-ModLayout $(if ($Mod.sub) { Join-Path $tmp $Mod.sub } else { $tmp }) $Mod.name
+        Set-LoadOrderNames $map
+        @(foreach ($e in $map) {
+                if ($Rels -notcontains $e.Rel) { continue }
+                $d = Join-Path $To $e.Rel
+                [void](New-Item -ItemType Directory -Force -Path (Split-Path $d))
+                Copy-Item -LiteralPath $e.Src -Destination $d -Force; $e.Rel
+            })
+    }
+    catch { Write-Note "  could not read the download of $($Mod.name): $($_.Exception.Message)" DarkYellow; @() }
+    finally { Remove-Item -LiteralPath $tmp -Recurse -Force -ErrorAction SilentlyContinue }
+}
+
+# 3-way merge of a JSON file two mods changed: each mod's changes against the original game file are kept. Objects merge
+# key by key, lists of named items ("name"/"group_name"/"id") item by item; where both changed the same value, $Theirs
+# wins and the spot ("FieldOfView.max_value") is listed in clashes. Formatting is not kept (the game reads JSON, not layout).
+function Merge-JsonText([string]$Base, [string]$Ours, [string]$Theirs) {
+    # values are passed by plain assignment, never through $( ) or if-expressions, which unwrap one-item lists
+    $p = @{ AsHashtable = $true; Depth = 200; NoEnumerate = $true }
+    if ((Get-Command ConvertFrom-Json).Parameters.ContainsKey('DateKind')) { $p.DateKind = 'String' }
+    $none = [object]::new()
+    $js = { param($v) if ([object]::ReferenceEquals($v, $none)) { '<none>' } else { ConvertTo-Json -InputObject $v -Compress -Depth 100 } }
+    $keyOf = { param($v) if ($v -is [Collections.IDictionary]) { foreach ($k in 'name', 'group_name', 'id') { if ($v.Contains($k) -and $v[$k] -is [string]) { return "$($v[$k])" } } }; '' }
+    $clash = [Collections.Generic.List[string]]::new()
+    # results are wrapped in a hashtable so PowerShell never unrolls a list on return
+    function Merge-Value($b, $x, $y, [string]$at) {
+        $sb = & $js $b; $sx = & $js $x; $sy = & $js $y
+        # case-sensitive: "kmh" -> "KMH" is a change
+        if ($sx -ceq $sy -or $sb -ceq $sy) { return @{ v = $x } }
+        if ($sb -ceq $sx) { return @{ v = $y } }
+        if ($x -is [Collections.IDictionary] -and $y -is [Collections.IDictionary]) {
+            $bo = if ($b -is [Collections.IDictionary]) { $b } else { @{} }
+            $r = [ordered]@{}
+            foreach ($k in @(@($x.Keys) + @($y.Keys | Where-Object { -not $x.Contains($_) }))) {
+                $vb = $none; $vx = $none; $vy = $none
+                if ($bo.Contains($k)) { $vb = $bo[$k] }; if ($x.Contains($k)) { $vx = $x[$k] }; if ($y.Contains($k)) { $vy = $y[$k] }
+                $m = Merge-Value $vb $vx $vy $(if ($at) { "$at.$k" } else { $k })
+                if (-not [object]::ReferenceEquals($m.v, $none)) { $r[$k] = $m.v }
+            }
+            return @{ v = $r }
+        }
+        if ($x -is [array] -and $y -is [array]) {
+            $ba = @(); if ($b -is [array]) { $ba = $b }
+            $kb = @($ba | ForEach-Object { & $keyOf $_ }); $kx = @($x | ForEach-Object { & $keyOf $_ }); $ky = @($y | ForEach-Object { & $keyOf $_ })
+            $uniq = { param($l) $l.Count -eq @($l | Sort-Object -Unique).Count -and $l -notcontains '' }
+            if ((& $uniq $kb) -and (& $uniq $kx) -and (& $uniq $ky)) {
+                $mb = @{}; $mx = @{}; $my = @{}
+                for ($i = 0; $i -lt $kb.Count; $i++) { $mb[$kb[$i]] = $ba[$i] }
+                for ($i = 0; $i -lt $kx.Count; $i++) { $mx[$kx[$i]] = $x[$i] }
+                for ($i = 0; $i -lt $ky.Count; $i++) { $my[$ky[$i]] = $y[$i] }
+                $out = [Collections.Generic.List[object]]::new()
+                foreach ($k in @(@($kx) + @($ky | Where-Object { $kx -notcontains $_ }))) {
+                    $vb = $none; $vx = $none; $vy = $none
+                    if ($mb.ContainsKey($k)) { $vb = $mb[$k] }; if ($mx.ContainsKey($k)) { $vx = $mx[$k] }; if ($my.ContainsKey($k)) { $vy = $my[$k] }
+                    $m = Merge-Value $vb $vx $vy $k
+                    if (-not [object]::ReferenceEquals($m.v, $none)) { $out.Add($m.v) }
+                }
+                return @{ v = $out.ToArray() }
+            }
+        }
+        $clash.Add($(if ($at) { $at } else { '(whole file)' }))
+        @{ v = $y }
+    }
+    $m = Merge-Value (ConvertFrom-Json $Base @p) (ConvertFrom-Json $Ours @p) (ConvertFrom-Json $Theirs @p) ''
+    [ordered]@{ text = (ConvertTo-Json -InputObject $m.v -Depth 100); clashes = @($clash | Select-Object -Unique) }
+}
+# the original game file of a path some mod replaced (its vanilla backup), or $null
+function Get-BaseCopy($S, [string]$Rel) {
+    foreach ($m in $S.mods) { if (@($m.backups) -contains $Rel) { $p = Join-Path $script:BkDir (Join-Path (Get-SafeName $m.name) $Rel); if (Test-Path -LiteralPath $p) { return $p } } }
+    $null
+}
+# the copy of $Rel the other mods keep once $Old (the version being replaced) is removed, as Remove-ModCore leaves it:
+# Old on top: the copy it replaced (saved, or from the other mod's download); Old below a combined copy: the other mod's own copy
+function Get-CopyWithout($S, $Old, [string]$Rel, [string]$Tmp) {
+    $disk = Join-Path $script:Game $Rel
+    $next = @($S.mods | Where-Object { -not [object]::ReferenceEquals($_, $Old) -and @($_.files) -contains $Rel } | Sort-Object { "$($_.installed)" }) | Select-Object -Last 1
+    if (-not $next) { return $disk }
+    $onTop = "$($Old.installed)" -gt "$($next.installed)"
+    if ($onTop -and (@($Old.under) | Where-Object { $_ -and $_.path -eq $Rel -and $_.owner -eq $next.name })) {
+        $bk = Join-Path $script:BkDir (Join-Path (Get-SafeName $Old.name) $Rel)
+        if (Test-Path -LiteralPath $bk) { return $bk }
+    }
+    if ($onTop -or @($next.merged) -contains $Rel) {
+        $to = Join-Path $Tmp '.cpmods-below'
+        if (@(Restore-ModFiles $next @($Rel) $to).Count) { return (Join-Path $to $Rel) }
+    }
+    $disk
+}
+# merged text of the copy on disk and a new copy, or $null when they cannot be combined (no original, not JSON, unreadable).
+# $Old: for an update, the installed version; its changes are left out of the copy on disk
+function Get-MergedFile($S, [string]$Rel, [string]$NewCopy, $Old, [string]$Tmp) {
+    $base = Get-BaseCopy $S $Rel
+    if (-not $base -or $Rel -notlike '*.json') { return $null }
+    $ours = if ($Old -and @($Old.files) -contains $Rel) { Get-CopyWithout $S $Old $Rel $Tmp } else { Join-Path $script:Game $Rel }
+    try { Merge-JsonText ([IO.File]::ReadAllText($base)) ([IO.File]::ReadAllText($ours)) ([IO.File]::ReadAllText($NewCopy)) } catch { $null }
+}
+
+# Shared files go back to the mod that stays: its copy replaces this one, and the original game file moves to it
+function Remove-ModCore($S, $M, [switch]$Purge) {
+    $others = @($S.mods | Where-Object { -not [object]::ReferenceEquals($_, $M) })
+    $safe = Get-SafeName $M.name
+    $plain = [Collections.Generic.List[string]]::new()
+    $fetch = @{}
+    $heir = @{}
+    foreach ($rel in @($M.files)) {
+        $dest = Join-Path $script:Game $rel
+        $bk = Join-Path $script:BkDir (Join-Path $safe $rel)
+        $owners = @($others | Where-Object { @($_.files) -contains $rel } | Sort-Object { "$($_.installed)" })
+        $waiting = @($others | Where-Object { @($_.keepOthers) -contains $rel } | Sort-Object { "$($_.installed)" })
+        $next = if ($owners) { $owners[-1] } elseif ($waiting) { $waiting[-1] } else { $null }
+        if ($next) { $heir[$rel] = $next }
+        # the copy on disk belongs to whichever owner installed last
+        if ($owners -and "$($M.installed)" -lt "$($owners[-1].installed)") {
+            # the copy in use was combined with this mod's changes: the mod on top gets its own copy back
+            if (@($next.merged) -contains $rel) { if (-not $fetch.ContainsKey($next.name)) { $fetch[$next.name] = [Collections.Generic.List[string]]::new() }; $fetch[$next.name].Add($rel) }
+            else { Write-Note "  kept (the copy of $($next.name) is in use): $rel" DarkGray }
+            continue
+        }
+        if (-not $next) { $plain.Add($rel); continue }
+        $u = @($M.under) | Where-Object { $_ -and $_.path -eq $rel -and $_.owner -eq $next.name } | Select-Object -First 1
+        if ($u -and (Test-Path -LiteralPath $bk)) { Copy-Item -LiteralPath $bk -Destination $dest -Force; Write-Note "  put back the copy of $($next.name): $rel" DarkYellow; continue }
+        if (-not $fetch.ContainsKey($next.name)) { $fetch[$next.name] = [Collections.Generic.List[string]]::new() }
+        $fetch[$next.name].Add($rel)
+    }
+    foreach ($n in @($fetch.Keys)) {
+        $mm = $others | Where-Object { $_.name -eq $n } | Select-Object -First 1
+        $done = @(Restore-ModFiles $mm @($fetch[$n]))
+        if ($done) { Write-Note "  put back the copy of $n for $($done.Count) file(s)" DarkYellow }
+        foreach ($rel in @($fetch[$n])) {
+            if ($done -contains $rel) {
+                if (@($mm.keepOthers) -contains $rel) { $mm.keepOthers = @($mm.keepOthers | Where-Object { $_ -ne $rel }); $mm.files = @(@($mm.files) + $rel) }
+                if (@($mm.merged) -contains $rel) { $mm.merged = @($mm.merged | Where-Object { $_ -ne $rel }) }
+            }
+            elseif (@($mm.files) -contains $rel) { Write-Note "  the download of $n is gone: its copy of $rel could not be put back (this mod's copy stays)" Yellow }
+            else { $heir.Remove($rel); $plain.Add($rel) }
+        }
+    }
+    foreach ($rel in @($heir.Keys)) {
+        $bk = Join-Path $script:BkDir (Join-Path $safe $rel)
+        if (-not (@($M.backups) -contains $rel -and (Test-Path -LiteralPath $bk))) { continue }
+        $nx = $heir[$rel]
+        $nb = Join-Path $script:BkDir (Join-Path (Get-SafeName $nx.name) $rel)
+        [void](New-Item -ItemType Directory -Force -Path (Split-Path $nb))
+        Copy-Item -LiteralPath $bk -Destination $nb -Force
+        $nx.backups = @(@($nx.backups) + $rel | Select-Object -Unique)
+    }
+    foreach ($rel in $plain) {
+        $dest = Join-Path $script:Game $rel
+        $bk = Join-Path $script:BkDir (Join-Path $safe $rel)
+        if (@($M.backups) -contains $rel) {
+            # a base game file: never deleted, even when its saved original is gone
+            if (Test-Path -LiteralPath $bk) { Copy-Item -LiteralPath $bk -Destination $dest -Force }
+            else { Write-Note "  kept $rel (its original game file copy is missing; Steam 'Verify integrity' restores the original)" Yellow }
+        }
+        elseif (Test-Path -LiteralPath $dest) { if ($M.adopted) { Remove-ToRecycleBin $dest } else { Remove-Item -LiteralPath $dest -Force } }
+    }
+    foreach ($d in (@($M.dirs) | Sort-Object { $_.Length } -Descending)) {
+        $p = Join-Path $script:Game $d
+        if (-not (Test-Path -LiteralPath $p)) { continue }
+        $empty = -not (Get-FirstEntry $p)
+        $foreign = $others | ForEach-Object { @($_.files) } | Where-Object { $_.StartsWith("$d\", [StringComparison]::OrdinalIgnoreCase) } | Select-Object -First 1
+        if ($empty) { Remove-Item -LiteralPath $p -Force }
+        elseif ($Purge -and -not $foreign) { Remove-Item -LiteralPath $p -Recurse -Force; Write-Note "  purged $d" DarkYellow }
+    }
+    Remove-Item -LiteralPath (Join-Path $script:BkDir $safe) -Recurse -Force -ErrorAction SilentlyContinue
+    [void]$S.mods.Remove($M)
+}
+
+# -Ask: when other mods already installed some of the files, return @{ conflict } and install nothing.
+# -OnConflict keep: leave their files alone; overwrite: replace them. Neither: earlier "keep" choices (meta keepOthers) still hold.
+function Install-ModArchive {
+    param([Parameter(Mandatory)][string]$Archive, [Parameter(Mandatory)][Collections.IDictionary]$Meta, [switch]$Force, [switch]$Ask, [string]$OnConflict)
+    Assert-GameReady -Force:$Force
+    if ($OnConflict -and $OnConflict -notin 'keep', 'overwrite', 'merge') { throw "Unknown choice $OnConflict" }
+    if (-not (Test-Path -LiteralPath $Archive)) { throw "Archive not found: $Archive" }
+    $tmp = Join-Path $script:TmpDir ([guid]::NewGuid().ToString('N'))
+    [void](New-Item -ItemType Directory -Path $tmp)
+    try {
+        Expand-ModArchive $Archive $tmp
+        $src = if ($Meta.sub) { Join-Path $tmp $Meta.sub } else { $tmp }
+        if (-not (Test-Path -LiteralPath $src)) { throw "Folder not found in archive: $($Meta.sub)" }
+        $map = Get-ModLayout $src $Meta.name
+        Set-LoadOrderNames $map
+        $s = Get-State
+        # files other mods installed; another file of the same Nexus mod is meant to replace them
+        $mid = [int]$Meta.modId
+        $old = $s.mods | Where-Object { $_.name -eq $Meta.name } | Select-Object -First 1
+        $clash = @(foreach ($e in $map) {
+                $o = @($s.mods | Where-Object { $_.name -ne $Meta.name -and -not ($mid -and [int]$_.modId -eq $mid) -and @($_.files) -contains $e.Rel })
+                if (-not $o) { continue }
+                $c = [ordered]@{ path = $e.Rel; owners = @($o | ForEach-Object { $_.name }) }
+                # can both be kept? (a JSON game file both mods edited); the values both changed are listed
+                if ($Ask) { $mg = Get-MergedFile $s $e.Rel $e.Src $old $tmp; if ($mg) { $c.merge = [ordered]@{ clashes = @($mg.clashes) } } }
+                $c
+            })
+        $prev = @($Meta.keepOthers); $prevMerged = @($Meta.merged)
+        if ($Ask -and -not $OnConflict -and @($clash | Where-Object { $prev -notcontains $_.path -and $prevMerged -notcontains $_.path }).Count) { return [pscustomobject]@{ conflict = $clash } }
+        $keep = @($clash | ForEach-Object { $_.path } | Where-Object { $OnConflict -eq 'keep' -or (-not $OnConflict -and $prev -contains $_) })
+        $mergeSet = @($clash | ForEach-Object { $_.path } | Where-Object { $OnConflict -eq 'merge' -or (-not $OnConflict -and $prevMerged -contains $_) })
+        $merged = [Collections.Generic.List[string]]::new()
+        if ($old) { Write-Note "Replacing $($old.name) $($old.version)"; Remove-ModCore $s $old }
+        $safe = Get-SafeName $Meta.name
+        $files = [Collections.Generic.List[string]]::new()
+        $backups = [Collections.Generic.List[string]]::new()
+        $under = [Collections.Generic.List[object]]::new()
+        $dirs = [Collections.Generic.List[string]]::new()
+        $copyError = $null
+        try {
+            foreach ($e in $map) {
+                $dest = Join-Path $script:Game $e.Rel
+                if ($keep -contains $e.Rel) { Write-Note "  kept the other mod's copy: $($e.Rel)" DarkYellow; continue }
+                $owners = @($s.mods | Where-Object { @($_.files) -contains $e.Rel } | Sort-Object { "$($_.installed)" })
+                if ($owners) {
+                    Write-Note "  overwrites file from $($owners.name -join ', '): $($e.Rel)" DarkYellow
+                    # the replaced copy comes back when this mod is removed, without reading the other download again
+                    if ((Test-Path -LiteralPath $dest) -and -not ($under | Where-Object { $_.path -eq $e.Rel })) {
+                        $bk = Join-Path $script:BkDir (Join-Path $safe $e.Rel)
+                        [void](New-Item -ItemType Directory -Force -Path (Split-Path $bk))
+                        Copy-Item -LiteralPath $dest -Destination $bk -Force
+                        $under.Add([ordered]@{ path = $e.Rel; owner = $owners[-1].name })
+                    }
+                }
+                elseif ((Test-Path -LiteralPath $dest) -and -not $backups.Contains($e.Rel)) {
+                    $bk = Join-Path $script:BkDir (Join-Path $safe $e.Rel)
+                    [void](New-Item -ItemType Directory -Force -Path (Split-Path $bk))
+                    Copy-Item -LiteralPath $dest -Destination $bk -Force
+                    $backups.Add($e.Rel)
+                    Write-Note "  backed up existing $($e.Rel)" DarkYellow
+                }
+                $p = Split-Path $dest
+                while (-not (Test-Path -LiteralPath $p)) { $dirs.Add([IO.Path]::GetRelativePath($script:Game, $p)); $p = Split-Path $p }
+                [void](New-Item -ItemType Directory -Force -Path (Split-Path $dest))
+                # combined with the other mod's copy when asked (falls back to replacing it when they cannot be combined)
+                $mt = if ($mergeSet -contains $e.Rel) { Get-MergedFile $s $e.Rel $e.Src } else { $null }
+                if ($mt) { [IO.File]::WriteAllText($dest, $mt.text, [Text.UTF8Encoding]::new($false)); $merged.Add($e.Rel); Write-Note "  combined with the other mod's copy: $($e.Rel)" DarkYellow }
+                else { Copy-Item -LiteralPath $e.Src -Destination $dest -Force }
+                if (-not $files.Contains($e.Rel)) { $files.Add($e.Rel) }
+            }
+        }
+        catch { $copyError = $_.Exception.Message }
+        $rec = [ordered]@{
+            name = $Meta.name; version = $Meta.version; source = $Meta.source; modId = $Meta.modId; fileId = $Meta.fileId
+            fileName = $Meta.fileName; sha256 = $Meta.sha256; archive = $Archive; sub = $Meta.sub
+            installed = (Get-Date).ToString('s'); files = $files; backups = $backups; dirs = $dirs
+        }
+        if ($keep) { $rec.keepOthers = $keep }
+        if ($merged.Count) { $rec.merged = $merged }
+        if ($under.Count) { $rec.under = $under }
+        if ($copyError) { $rec.broken = $copyError }
+        $s.mods.Add($rec)
+        foreach ($k in 'pending', 'failed', 'disabled') {
+            foreach ($x in @($s[$k] | Where-Object { $(if ($k -eq 'disabled') { $_.name } else { $_.meta.name }) -eq $Meta.name })) { [void]$s[$k].Remove($x) }
+        }
+        Save-State $s
+        if ($copyError) { throw "Copy failed after $($files.Count) files: $copyError" }
+        Write-Note "Installed $($Meta.name) $($Meta.version) ($($files.Count) files)" Green
+        $Meta.name
+    }
+    finally { Remove-Item -LiteralPath $tmp -Recurse -Force -ErrorAction SilentlyContinue }
+}
+
+function Find-InstalledMod($S, [string]$N) {
+    $hit = @($S.mods | Where-Object { $_.name -eq $N })
+    if (-not $hit) { $hit = @($S.mods | Where-Object { $_.name -like "*$N*" }) }
+    if ($hit.Count -ne 1) { throw "Match '$N' -> $($hit.Count) mods: $(($hit | ForEach-Object { $_.name }) -join ', ')" }
+    $hit[0]
+}
+
+function Remove-InstalledMod([string]$Name, [switch]$Purge, [switch]$Force) {
+    Assert-GameReady -Force:$Force
+    $s = Get-State
+    $d = $s.disabled | Where-Object { $_.name -eq $Name } | Select-Object -First 1
+    if ($d) {
+        if ($d.parked -and (Test-Path -LiteralPath $d.parked)) { Remove-ToRecycleBin $d.parked -Directory }
+        [void]$s.disabled.Remove($d); Save-State $s; Write-Note "Removed disabled entry $Name" Green; return
+    }
+    $m = Find-InstalledMod $s $Name
+    Remove-ModCore $s $m -Purge:$Purge
+    Save-State $s
+    Write-Note "Removed $($m.name)" Green
+}
+
+function Disable-InstalledMod([string]$Name) {
+    Assert-GameReady
+    $s = Get-State
+    $m = Find-InstalledMod $s $Name
+    if ($m.adopted) {
+        # no archive: move the files aside so Enable can put them back
+        $park = Join-Path $script:Root ('parked\' + (Get-SafeName $m.name))
+        $others = @($s.mods | Where-Object { -not [object]::ReferenceEquals($_, $m) })
+        $moved = [Collections.Generic.List[string]]::new()
+        foreach ($rel in @($m.files)) {
+            $src = Join-Path $script:Game $rel
+            if (-not (Test-Path -LiteralPath $src) -or ($others | Where-Object { @($_.files) -contains $rel })) { continue }
+            $dst = Join-Path $park $rel
+            [void](New-Item -ItemType Directory -Force -Path (Split-Path $dst))
+            Move-Item -LiteralPath $src -Destination $dst -Force
+            $moved.Add($rel)
+        }
+        foreach ($d in (@($m.dirs) | Sort-Object { $_.Length } -Descending)) {
+            $p = Join-Path $script:Game $d
+            if ((Test-Path -LiteralPath $p) -and -not (Get-FirstEntry $p -Recurse -File)) { Remove-Item -LiteralPath $p -Recurse -Force }
+        }
+        [void]$s.mods.Remove($m)
+        $s.disabled.Add([ordered]@{
+                name = $m.name; version = $m.version; source = $m.source; modId = $m.modId; fileId = $null; fileName = $null
+                adopted = $true; parked = $park; files = $moved; dirs = @($m.dirs); archive = $null; disabledAt = (Get-Date).ToString('s')
+            })
+        Save-State $s
+        Write-Note "Disabled $($m.name) (files moved to $park)" Green
+        return
+    }
+    if (-not $m.archive -or -not (Test-Path -LiteralPath $m.archive)) { throw "The archive for $($m.name) was deleted, so it could not be re-enabled. Use Remove instead." }
+    $was = @($m.files)
+    Remove-ModCore $s $m
+    $s.disabled.Add([ordered]@{
+            name = $m.name; version = $m.version; source = $m.source; modId = $m.modId; fileId = $m.fileId; fileName = $m.fileName
+            sha256 = $m.sha256; sub = $m.sub; archive = $m.archive; disabledAt = (Get-Date).ToString('s'); files = $was; keepOthers = $m.keepOthers; merged = $m.merged
+        })
+    Save-State $s
+    Write-Note "Disabled $($m.name)" Green
+}
+
+function Enable-InstalledMod([string]$Name) {
+    $s = Get-State
+    $d = $s.disabled | Where-Object { $_.name -eq $Name } | Select-Object -First 1
+    if (-not $d) { throw "No disabled mod named $Name" }
+    if ($d.parked) {
+        Assert-GameReady
+        $clash = @(@($d.files) | Where-Object { Test-Path -LiteralPath (Join-Path $script:Game $_) })
+        if ($clash) { throw "Cannot enable $($d.name): $($clash.Count) of its files now exist in the game folder (e.g. $($clash[0]))" }
+        foreach ($rel in @($d.files)) {
+            $src = Join-Path $d.parked $rel
+            if (-not (Test-Path -LiteralPath $src)) { continue }
+            $dst = Join-Path $script:Game $rel
+            [void](New-Item -ItemType Directory -Force -Path (Split-Path $dst))
+            Move-Item -LiteralPath $src -Destination $dst
+        }
+        Remove-Item -LiteralPath $d.parked -Recurse -Force -ErrorAction SilentlyContinue
+        [void]$s.disabled.Remove($d)
+        $s.mods.Add([ordered]@{
+                name = $d.name; version = $d.version; source = $d.source; modId = $d.modId; fileId = $null; fileName = $null; sha256 = $null
+                archive = $null; sub = $null; adopted = $true; installed = (Get-Date).ToString('s'); files = @($d.files); backups = @(); dirs = @($d.dirs)
+            })
+        Save-State $s
+        Write-Note "Enabled $($d.name)" Green
+        return
+    }
+    Install-ModArchive -Archive $d.archive -Meta (Copy-Meta $d) | Out-Null
+}
+
+function Copy-Meta($Src) {
+    $o = [ordered]@{}
+    foreach ($k in 'name', 'version', 'source', 'modId', 'fileId', 'fileName', 'sha256', 'sub', 'keepOthers', 'merged') { if ($null -ne $Src[$k]) { $o[$k] = $Src[$k] } }
+    $o
+}
+
+function Add-Deferred([string]$Kind, [string]$Archive, [Collections.IDictionary]$Meta, [string]$Err, $Conflict) {
+    $s = Get-State
+    foreach ($x in @($s[$Kind] | Where-Object { $_.meta.name -eq $Meta.name })) { [void]$s[$Kind].Remove($x) }
+    $e = [ordered]@{ archive = $Archive; meta = $Meta; error = $Err; at = (Get-Date).ToString('s') }
+    if ($Conflict) { $e.conflict = @($Conflict) }
+    $s[$Kind].Add($e)
+    Save-State $s
+}
+
+function Remove-Deferred([string]$Name) {
+    $s = Get-State
+    $n = 0
+    foreach ($k in 'pending', 'failed') { foreach ($x in @($s[$k] | Where-Object { $_.meta.name -eq $Name })) { [void]$s[$k].Remove($x); $n++ } }
+    if ($n) { Save-State $s }
+    $n
+}
+
+function Get-DeferredMeta([string]$Archive) {
+    $s = Get-State
+    foreach ($k in 'failed', 'pending') {
+        $e = $s[$k] | Where-Object { "$($_.archive)" -eq $Archive } | Select-Object -First 1
+        if ($e) { return (Copy-Meta $e.meta) }
+    }
+    foreach ($k in 'disabled', 'mods') {
+        $e = $s[$k] | Where-Object { "$($_.archive)" -eq $Archive } | Select-Object -First 1
+        if ($e) { return (Copy-Meta $e) }
+    }
+    $null
+}
+
+function Resolve-DownloadFile([string]$Leaf) {
+    $n = [IO.Path]::GetFileName("$Leaf")
+    if (-not $n -or $n -ne "$Leaf") { throw 'Invalid file name' }
+    $p = Join-Path $script:DlDir $n
+    if (-not (Test-Path -LiteralPath $p)) { throw "Not found in downloads: $n" }
+    $p
+}
+
+function Get-DownloadsInfo($S) {
+    if (-not $S) { $S = Get-State }
+    $ref = @{}
+    foreach ($m in $S.mods) { if ($m.archive) { $ref["$($m.archive)".ToLower()] = @('installed', $m.name, $m) } }
+    foreach ($d in $S.disabled) { if ($d.archive) { $ref["$($d.archive)".ToLower()] = @('disabled', $d.name, $d) } }
+    foreach ($p in $S.pending) { $ref["$($p.archive)".ToLower()] = @('pending', $p.meta.name, $p.meta) }
+    foreach ($f in $S.failed) { $ref["$($f.archive)".ToLower()] = @('failed', $f.meta.name, $f.meta) }
+    foreach ($f in Get-ChildItem -LiteralPath $script:DlDir -File | Where-Object { $_.Extension -ne '.part' } | Sort-Object LastWriteTime -Descending) {
+        $r = $ref[$f.FullName.ToLower()]
+        $x = if ($r) { $r[2] } else { $null }
+        $mid = if ($x -and $x.modId) { [int]$x.modId } else { 0 }
+        $fid = if ($x -and $x.fileId) { [int]$x.fileId } else { 0 }
+        $ver = if ($x) { "$($x.version)" } else { '' }
+        # Nexus file names carry the mod id: "Name 1234 1.0 2026-01-02T03-04Z abc.zip" or "Name-1234-1-0-1700000000.zip"
+        if (-not $mid -and ($f.Name -match '^.+? (\d{2,7}) (\S+) \d{4}-\d{2}-\d{2}T\d{2}-\d{2}Z' -or $f.Name -match '^.+?-(\d{2,7})-([\w\-]+?)-\d{9,11}\.\w+$')) { $mid = [int]$Matches[1]; if (-not $ver) { $ver = $Matches[2] -replace '-', '.' } }
+        [ordered]@{ file = $f.Name; size = $f.Length; date = $f.LastWriteTime.ToString('s'); status = $(if ($r) { $r[0] } else { 'unused' }); name = $(if ($r) { $r[1] } else { $null }); modId = $mid; fileId = $fid; version = $ver }
+    }
+}
+
+# Lists folders inside an archive that look like a game root (for variant / FOMOD choice)
+function Get-ArchiveCandidates([string]$Archive) {
+    $paths = Get-ArchiveEntries $Archive
+    $c = [Collections.Generic.HashSet[string]]::new([StringComparer]::OrdinalIgnoreCase)
+    $top = [Collections.Generic.HashSet[string]]::new([StringComparer]::OrdinalIgnoreCase)
+    foreach ($p in $paths) {
+        $parts = $p -split '[\\/]'
+        [void]$top.Add($parts[0])
+        for ($i = 0; $i -lt $parts.Count - 1; $i++) {
+            if ($script:Known -contains $parts[$i]) { [void]$c.Add($(if ($i -eq 0) { '.' } else { $parts[0..($i - 1)] -join '\' })) }
+        }
+    }
+    $list = @($c | Sort-Object { ($_ -split '\\').Count }, { $_ })
+    $roots = @($list | Where-Object { $x = $_; -not ($list | Where-Object { $_ -ne $x -and ($_ -eq '.' -or $x.StartsWith("$_\", [StringComparison]::OrdinalIgnoreCase)) }) })
+    [ordered]@{ candidates = $roots; fomod = [bool]($paths | Where-Object { $_ -match '(^|[\\/])fomod[\\/]ModuleConfig\.xml$' }); top = @($top); count = $paths.Count }
+}
+#endregion
+
+#region load order: archive\pc\mod loads in ASCII name order and the first archive loaded wins a conflict
+# rules (state\loadorder.json, key = original name in lower case) keep a renamed archive renamed after reinstalls and updates
+function Get-LoadOrderRules {
+    $f = Join-Path $script:StateDir 'loadorder.json'
+    if (Test-Path -LiteralPath $f) { $r = Read-JsonFile $f; if ($r -is [Collections.IDictionary]) { return $r } }
+    @{}
+}
+function Set-LoadOrderNames($Map) {
+    $r = Get-LoadOrderRules
+    if (-not $r.Count) { return }
+    foreach ($e in $Map) { if ($e.Rel -like 'archive\pc\mod\*') { $x = $r[[IO.Path]::GetFileName($e.Rel).ToLower()]; if ($x) { $e.Rel = "archive\pc\mod\$($x.name)" } } }
+}
+function Rename-ModArchive($S, [string]$From, [string]$To) {
+    $dir = Join-Path $script:Game 'archive\pc\mod'
+    if (Test-Path -LiteralPath (Join-Path $dir $To)) { throw "$To already exists" }
+    Move-Item -LiteralPath (Join-Path $dir $From) -Destination (Join-Path $dir $To)
+    foreach ($m in $S.mods) { $m.files = @(@($m.files) | ForEach-Object { if ($_ -eq "archive\pc\mod\$From") { "archive\pc\mod\$To" } else { $_ } }) }
+}
+# makes $Archive load before $Over by adding "!" in front of its name ("!" sorts before letters, digits and #)
+function Set-ArchiveWinner([string]$Archive, [string]$Over) {
+    Assert-GameReady
+    $r = Get-LoadOrderRules
+    $k = @($r.Keys | Where-Object { $r[$_].name -eq $Archive }) | Select-Object -First 1
+    $orig = if ($k) { "$($r[$k].orig)" } else { $Archive }
+    $s = Get-State
+    $m = $s.mods | Where-Object { @($_.files) -contains "archive\pc\mod\$Archive" } | Select-Object -First 1
+    if (-not $m) { throw "$Archive is not managed by cpmods" }
+    $p = '!'
+    while ([string]::CompareOrdinal("$p$orig", $Over) -ge 0 -or [StringComparer]::OrdinalIgnoreCase.Compare("$p$orig", $Over) -ge 0) { $p += '!'; if ($p.Length -gt 16) { throw "No name sorts before $Over" } }
+    $to = "$p$orig"
+    if ($to -ne $Archive) { Rename-ModArchive $s $Archive $to }
+    $r[$orig.ToLower()] = [ordered]@{ orig = $orig; name = $to; over = $Over; mod = $m.name; at = (Get-Date).ToString('s') }
+    Write-JsonFile (Join-Path $script:StateDir 'loadorder.json') $r
+    Save-State $s
+    Write-Note "Load order: $to now loads before $Over ($($m.name) wins)"
+    $to
+}
+function Reset-ArchiveName([string]$Archive) {
+    Assert-GameReady
+    $r = Get-LoadOrderRules
+    $k = @($r.Keys | Where-Object { $r[$_].name -eq $Archive -or $_ -eq $Archive.ToLower() }) | Select-Object -First 1
+    if (-not $k) { throw "No load order change for $Archive" }
+    $x = $r[$k]
+    $s = Get-State
+    if (Test-Path -LiteralPath (Join-Path $script:Game "archive\pc\mod\$($x.name)")) { Rename-ModArchive $s $x.name $x.orig; Save-State $s }
+    $r.Remove($k)
+    Write-JsonFile (Join-Path $script:StateDir 'loadorder.json') $r
+    Write-Note "Load order: $($x.orig) has its own name again"
+    "$($x.orig)"
+}
+#endregion
+
+#region frameworks
+function Install-GitHubFramework($Fw, [switch]$DownloadOnly, [switch]$Force) {
+    $api = if ($Fw.tag) { "https://api.github.com/repos/$($Fw.repo)/releases/tags/$($Fw.tag)" } else { "https://api.github.com/repos/$($Fw.repo)/releases/latest" }
+    $rel = Invoke-RestMethod $api -Headers @{ 'User-Agent' = 'cpmods' } -TimeoutSec 30
+    $asset = $rel.assets | Where-Object { $_.name -match $Fw.asset } | Select-Object -First 1
+    if (-not $asset) { throw "No asset matching $($Fw.asset) in $($Fw.repo) $($rel.tag_name)" }
+    $cur = (Get-State).mods | Where-Object { $_.name -eq $Fw.name } | Select-Object -First 1
+    if ($cur -and $cur.version -eq $rel.tag_name -and -not $Force) { Write-Note "$($Fw.name) $($rel.tag_name) up to date" DarkGray; return "$($Fw.name) up to date" }
+    $out = Join-Path $script:DlDir $asset.name
+    if (-not (Test-Path -LiteralPath $out)) {
+        # .part until complete: an interrupted download never leaves a broken zip to reuse
+        Save-UrlToFile $asset.browser_download_url $out
+        if ($asset.digest -match '^sha256:([0-9a-f]+)$' -and (Get-FileHash -LiteralPath $out -Algorithm SHA256).Hash -ne $Matches[1]) {
+            Remove-Item -LiteralPath $out; throw "SHA256 mismatch: $($asset.name)"
+        }
+        Write-Note "Downloaded $($asset.name)"
+    }
+    if ($DownloadOnly) { return "$($Fw.name) downloaded" }
+    Install-ModArchive -Archive $out -Meta ([ordered]@{ name = $Fw.name; version = $rel.tag_name; source = "github:$($Fw.repo)"; modId = $Fw.nexusId }) -Force:$Force | Out-Null
+    "$($Fw.name) $($rel.tag_name) installed"
+}
+
+function Invoke-Frameworks([switch]$Force) {
+    $pending = (Get-GameState).updatePending -and -not $Force
+    if ($pending) { Write-Note 'Steam update pending: downloading frameworks only.' Yellow }
+    # one framework failing (GitHub down or rate-limited) must not stop the others or the waiting mods after them
+    foreach ($fw in Get-Frameworks) {
+        try { Install-GitHubFramework $fw -DownloadOnly:$pending -Force:$Force }
+        catch { Write-Note "  $($fw.name) not updated: $($_.Exception.Message)" Yellow; "$($fw.name) not updated: $($_.Exception.Message)" }
+    }
+}
+
+function Invoke-Sync([switch]$Force) {
+    Invoke-Frameworks -Force:$Force
+    if ((Get-GameState).updatePending -and -not $Force) { return }
+    $ask = Test-AskOverwrite
+    foreach ($p in @((Get-State).pending)) {
+        if ($ask -and $p.conflict) { "Waiting for your choice: $($p.meta.name)"; continue }
+        try {
+            $r = Install-ModArchive -Archive $p.archive -Meta $p.meta -Ask:$ask
+            if ($r.conflict) { Add-Deferred 'pending' $p.archive $p.meta '' $r.conflict; "Waiting for your choice: $($p.meta.name)" } else { "Installed $($p.meta.name)" }
+        }
+        catch { Write-Note "FAILED $($p.meta.name): $($_.Exception.Message)" Red; Add-Deferred 'failed' $p.archive $p.meta $_.Exception.Message; "Failed $($p.meta.name)" }
+    }
+}
+
+function Get-FrameworkUpdates {
+    $s = Get-State
+    foreach ($fw in Get-Frameworks) {
+        $cur = $s.mods | Where-Object { $_.name -eq $fw.name } | Select-Object -First 1
+        $latest = $null; $err = $null
+        try {
+            $api = if ($fw.tag) { "https://api.github.com/repos/$($fw.repo)/releases/tags/$($fw.tag)" } else { "https://api.github.com/repos/$($fw.repo)/releases/latest" }
+            $latest = (Invoke-RestMethod $api -Headers @{ 'User-Agent' = 'cpmods' } -TimeoutSec 20).tag_name
+        }
+        catch { $err = $_.Exception.Message }
+        [ordered]@{ name = $fw.name; nexusId = $fw.nexusId; installed = $cur.version; latest = $latest; pinned = [bool]$fw.tag; update = [bool]($latest -and $cur -and $cur.version -ne $latest); missing = (-not $cur); error = $err }
+    }
+}
+#endregion
+
+#region nexus
+function Test-NexusKey { Test-Path -LiteralPath $script:KeyFile }
+
+function Get-NexusKey {
+    if (-not (Test-NexusKey)) { throw 'No Nexus API key. Run: cpmods setkey' }
+    [Net.NetworkCredential]::new('', ([IO.File]::ReadAllText($script:KeyFile).Trim() | ConvertTo-SecureString)).Password
+}
+
+function Get-NexusHeaders([string]$Key) {
+    if (-not $Key) { $Key = Get-NexusKey }
+    @{ apikey = $Key; 'Application-Name' = 'cpmods'; 'Application-Version' = '2.0'; 'User-Agent' = 'cpmods/2.0' }
+}
+
+function Set-NexusKey([string]$Plain) {
+    $Plain = "$Plain".Trim().Trim('"', "'").Trim()
+    if ($Plain.Length -lt 20) { throw 'That is too short to be a Nexus API key. Copy the whole key from the Nexus page.' }
+    try { $v = Invoke-RestMethod 'https://api.nexusmods.com/v1/users/validate.json' -Headers (Get-NexusHeaders $Plain) -TimeoutSec 20 }
+    catch { throw "Nexus did not accept it: $(Get-HttpErrorText $_)" }
+    [IO.File]::WriteAllText($script:KeyFile, ($Plain | ConvertTo-SecureString -AsPlainText -Force | ConvertFrom-SecureString))
+    $v
+}
+
+# Readable message from a failed web request (Nexus returns {"message": ...})
+function Get-HttpErrorText($Err) {
+    $body = "$($Err.ErrorDetails.Message)"
+    $code = try { [int]$Err.Exception.Response.StatusCode } catch { 0 }
+    $msg = $null
+    if ($body) { try { $j = $body | ConvertFrom-Json; $msg = if ($j.message) { $j.message } elseif ($j.error) { $j.error } } catch { $msg = $body.Substring(0, [Math]::Min(200, $body.Length)) } }
+    if (-not $msg) { $msg = $Err.Exception.Message }
+    if ($code) { "$msg (HTTP $code)" } else { $msg }
+}
+
+function Invoke-NexusV1([string]$Path) {
+    try { Invoke-RestMethod "https://api.nexusmods.com/v1/$Path" -Headers (Get-NexusHeaders) -TimeoutSec 30 }
+    catch { throw "Nexus API: $(Get-HttpErrorText $_)" }
+}
+
+# File details plus the archive manifest (file list, SHA256) Nexus publishes per upload
+function Get-NexusFileInfo([int]$ModId, [int]$FileId) {
+    $fi = Invoke-NexusV1 "games/$($script:NexusGame)/mods/$ModId/files/$FileId.json"
+    $files = @(); $sha = $null
+    if ($fi.content_preview_link) {
+        try { $man = Invoke-RestMethod $fi.content_preview_link -TimeoutSec 20; $sha = $man.archive.hashes.SHA256; $files = @($man.files | ForEach-Object { $_.file_path }) } catch { }
+    }
+    $kinds = [ordered]@{}
+    foreach ($p in $files) {
+        $k = switch ([IO.Path]::GetExtension("$p").ToLower()) {
+            '.reds' { 'redscript' } '.lua' { 'cet' } '.dll' { 'native' } '.asi' { 'native' }
+            '.yaml' { 'tweak' } '.yml' { 'tweak' } '.tweak' { 'tweak' } '.xl' { 'archivexl' } '.archive' { 'archive' }
+            '.ini' { 'config' } '.xml' { 'input' } '.json' { 'data' } default { 'other' }
+        }
+        $kinds[$k] = 1 + [int]$kinds[$k]
+    }
+    [ordered]@{
+        name = $fi.name; version = $fi.version; fileName = $fi.file_name; size = $fi.size_in_bytes; uploaded = $fi.uploaded_timestamp
+        category = $fi.category_name; sha256 = $sha; fileCount = $files.Count; files = @($files | Select-Object -First 400); kinds = $kinds
+        fomod = [bool]($files | Where-Object { $_ -match '(^|/)fomod/ModuleConfig\.xml$' })
+    }
+}
+
+function Resolve-NxmLink([string]$Url) {
+    $m = [regex]::Match("$Url", '^nxm://(?<game>[^/]+)/mods/(?<mod>\d+)/files/(?<file>\d+)\?(?<q>.+)$', 'IgnoreCase')
+    if (-not $m.Success) { throw "Unrecognized nxm link: $Url" }
+    if ($m.Groups['game'].Value -ne $script:NexusGame) { throw "Link is for '$($m.Groups['game'].Value)', not $($script:NexusGame)" }
+    $qs = @{}
+    foreach ($kv in $m.Groups['q'].Value -split '&') { $k, $v = $kv -split '=', 2; $qs[$k] = [uri]::UnescapeDataString("$v") }
+    [ordered]@{ modId = [int]$m.Groups['mod'].Value; fileId = [int]$m.Groups['file'].Value; key = $qs['key']; expires = $qs['expires'] }
+}
+
+function Save-UrlToFile([string]$Url, [string]$OutFile, $Job) {
+    $client = [Net.Http.HttpClient]::new()
+    $client.Timeout = [TimeSpan]::FromHours(3)
+    [void]$client.DefaultRequestHeaders.UserAgent.TryParseAdd('cpmods/2.0')
+    $part = "$OutFile.part"
+    try {
+        $resp = $client.GetAsync($Url, [Net.Http.HttpCompletionOption]::ResponseHeadersRead).GetAwaiter().GetResult()
+        [void]$resp.EnsureSuccessStatusCode()
+        if ($Job) { $Job.total = $resp.Content.Headers.ContentLength; $Job.done = 0 }
+        $in = $resp.Content.ReadAsStreamAsync().GetAwaiter().GetResult()
+        $out = [IO.File]::Create($part)
+        try {
+            $buf = [byte[]]::new(1MB)
+            $sum = [long]0
+            while (($n = $in.Read($buf, 0, $buf.Length)) -gt 0) { $out.Write($buf, 0, $n); $sum += $n; if ($Job) { $Job.done = $sum } }
+        }
+        finally { $out.Dispose(); $in.Dispose(); $resp.Dispose() }
+        [IO.File]::Move($part, $OutFile, $true)
+    }
+    catch { Remove-Item -LiteralPath $part -Force -ErrorAction SilentlyContinue; throw }
+    finally { $client.Dispose() }
+}
+
+# Picks the tracked name: explicit intent, queue entry, update of an installed file, or the mod name
+function Resolve-InstallName([int]$ModId, [int]$FileId, [string]$FileDisplayName, [string]$IntentName) {
+    if ($IntentName) { return $IntentName }
+    $qi = Get-Queue | Where-Object { [int]$_.modId -eq $ModId -and [int]$_.fileId -eq $FileId } | Select-Object -First 1
+    if ($qi) { return $qi.name }
+    $s = Get-State
+    $same = @(@($s.mods) + @($s.disabled) | Where-Object { $_ -and [int]$_.modId -eq $ModId })
+    $match = @($same | Where-Object { $_.fileName -and (Get-NormName $_.fileName) -eq (Get-NormName $FileDisplayName) })
+    if ($match.Count -eq 1) { return $match[0].name }
+    if ($same.Count -eq 1 -and -not $same[0].fileName) { return $same[0].name }
+    $modName = try { (Invoke-NexusV1 "games/$($script:NexusGame)/mods/$ModId.json").name } catch { $FileDisplayName }
+    if (-not $modName) { $modName = $FileDisplayName }
+    if ($same | Where-Object { $_.name -eq $modName }) { return "$modName - $FileDisplayName" }
+    $modName
+}
+
+function Invoke-NxmDownload {
+    param([string]$Url, $Job, [string]$IntentName, [scriptblock]$OnLinkReady)
+    $l = Resolve-NxmLink $Url
+    $base = "games/$($script:NexusGame)/mods/$($l.modId)/files/$($l.fileId)"
+    if ($Job) { $Job.phase = 'resolving' }
+    try { $fi = Invoke-NexusV1 "$base.json" }
+    catch { throw "Nexus has no file $($l.fileId) for mod $($l.modId). $($_.Exception.Message)" }
+    if ($Job) { $Job.title = "$($fi.name) $($fi.version)".Trim() }
+    try {
+        $links = Invoke-RestMethod ("https://api.nexusmods.com/v1/$base/download_link.json?key={0}&expires={1}" -f [uri]::EscapeDataString("$($l.key)"), [uri]::EscapeDataString("$($l.expires)")) -Headers (Get-NexusHeaders) -TimeoutSec 30
+    }
+    catch { throw "Nexus refused the download link: $(Get-HttpErrorText $_). Links expire after a few minutes; click Slow download again." }
+    $uri = @($links)[0].URI
+    if (-not $uri) { throw 'Nexus returned no download link' }
+    if ($OnLinkReady) { & $OnLinkReady $l }
+    $sha = $null
+    try { if ($fi.content_preview_link) { $sha = (Invoke-RestMethod $fi.content_preview_link -TimeoutSec 20).archive.hashes.SHA256 } } catch { }
+    $out = Join-Path $script:DlDir (Get-SafeFileName $fi.file_name)
+    $reuse = (Test-Path -LiteralPath $out) -and $sha -and ((Get-FileHash -LiteralPath $out -Algorithm SHA256).Hash -eq $sha)
+    if (-not $reuse) {
+        if ($Job) { $Job.phase = 'downloading' }
+        Save-UrlToFile $uri $out $Job
+        if ($sha -and (Get-FileHash -LiteralPath $out -Algorithm SHA256).Hash -ne $sha) {
+            Remove-Item -LiteralPath $out -Force
+            throw "Checksum mismatch for $($fi.file_name): the download was corrupted, try again"
+        }
+    }
+    Write-Note ("Downloaded {0}{1}" -f $fi.file_name, $(if ($sha) { ' (SHA256 verified)' } else { '' }))
+    $name = Resolve-InstallName -ModId $l.modId -FileId $l.fileId -FileDisplayName $fi.name -IntentName $IntentName
+    $meta = [ordered]@{ name = $name; version = "$($fi.version)"; source = "nexus:$($l.modId)/$($l.fileId)"; modId = $l.modId; fileId = $l.fileId; fileName = $fi.name; sha256 = $sha }
+    $qi = Get-Queue | Where-Object { [int]$_.fileId -eq $l.fileId -and $_.sub } | Select-Object -First 1
+    if ($qi) { $meta.sub = "$($qi.sub)" }
+    @{ archive = $out; meta = $meta; link = $l }
+}
+
+# Installs now when possible, otherwise parks the archive in pending / failed
+function Complete-NexusDownload([string]$Archive, [Collections.IDictionary]$Meta) {
+    Use-Lock {
+        $g = Get-GameState
+        $set = Get-CpSettings
+        $why = if ($g.updatePending) { 'game update pending' } elseif ($g.running) { 'game is running' } elseif (-not $set.autoInstall) { 'auto-install is off' } else { $null }
+        if ($why) { Add-Deferred 'pending' $Archive $Meta ''; Write-Note "Waiting to install $($Meta.name) ($why)" Yellow; return "waiting to install ($why)" }
+        try {
+            $r = Install-ModArchive -Archive $Archive -Meta $Meta -Ask:(Test-AskOverwrite)
+            if ($r.conflict) { Add-Deferred 'pending' $Archive $Meta '' $r.conflict; Write-Note "Waiting for your choice: $($Meta.name) has files another mod installed" Yellow; return 'waiting for your choice (another mod has some of the same files)' }
+            'installed'
+        }
+        catch {
+            $msg = $_.Exception.Message
+            Add-Deferred 'failed' $Archive $Meta $msg
+            Write-Note "Install of $($Meta.name) needs attention: $msg" Red
+            throw "Downloaded, but the install needs attention: $msg"
+        }
+    }
+}
+#endregion
+
+#region diagnostics
+function Test-Install {
+    $s = Get-State
+    $missing = foreach ($m in $s.mods) {
+        $miss = @(@($m.files) | Where-Object { -not (Test-Path -LiteralPath (Join-Path $script:Game $_)) })
+        if ($miss) { [ordered]@{ name = $m.name; count = $miss.Count; sample = $miss[0] } }
+    }
+    $logs = @(Get-ChildItem -LiteralPath (Join-Path $script:Game 'red4ext\logs'), (Join-Path $script:Game 'r6\logs') -File -Filter *.log -ErrorAction SilentlyContinue) +
+    @(Get-ChildItem -LiteralPath (Join-Path $script:Game 'bin\x64\plugins\cyber_engine_tweaks') -Recurse -Depth 4 -File -Filter *.log -ErrorAction SilentlyContinue)
+    $since = (Get-Date).AddHours(-24)
+    $found = foreach ($l in ($logs | Where-Object LastWriteTime -GT $since | Sort-Object FullName)) {
+        # "doesn't match the expected bytes" etc: a plugin found the game code already patched by another mod
+        $hits = @(Select-String -LiteralPath $l.FullName -Pattern '(?i)\[(error|critical)\]|\berror\b|exception|failed to|could not|unable to|(doesn''t|does not) match the expected|not installed|hook failed|signature not found|pattern not found' -ErrorAction SilentlyContinue | Select-Object -Last 15 | ForEach-Object { $_.Line.Trim() })
+        if ($hits) { [ordered]@{ file = [IO.Path]::GetRelativePath($script:Game, $l.FullName); modified = $l.LastWriteTime.ToString('s'); lines = $hits } }
+    }
+    $latest = $logs | Sort-Object LastWriteTime -Descending | Select-Object -First 1
+    [ordered]@{ missing = @($missing); logs = @($found); checkedLogs = @($logs).Count; lastLog = $(if ($latest) { $latest.LastWriteTime.ToString('s') } else { $null }) }
+}
+#endregion
+
+#region compatibility
+function Invoke-NexusGql([string]$Query, $Variables) {
+    $body = @{ query = $Query }
+    if ($Variables) { $body.variables = $Variables }
+    $json = ConvertTo-Json -InputObject $body -Depth 20 -Compress
+    $r = Invoke-RestMethod -Method Post -Uri 'https://api.nexusmods.com/v2/graphql' -ContentType 'application/json; charset=utf-8' -Body ([Text.Encoding]::UTF8.GetBytes($json)) -Headers @{ 'User-Agent' = 'cpmods/2.0' } -TimeoutSec 45
+    if ($r.errors) { throw "Nexus: $($r.errors[0].message)" }
+    $r.data
+}
+
+# Compiles C# once per source and runtime version into state\bin, then loads that DLL (keeps the compiler out of memory)
+function Import-CpType([string]$Name, [string]$Source) {
+    if ($Name -as [type]) { return }
+    $dir = Join-Path $script:StateDir 'bin'
+    $tag = [Convert]::ToHexString([Security.Cryptography.SHA256]::HashData([Text.Encoding]::UTF8.GetBytes("$Source|$([Environment]::Version)"))).Substring(0, 12)
+    $dll = Join-Path $dir "$Name-$tag.dll"
+    try {
+        if (-not (Test-Path -LiteralPath $dll)) {
+            [void](New-Item -ItemType Directory -Force -Path $dir)
+            $tmp = Join-Path $dir ('{0}-{1}.{2}.{3}.dll' -f $Name, $tag, $PID, [Threading.Thread]::CurrentThread.ManagedThreadId)
+            Add-Type -TypeDefinition $Source -OutputAssembly $tmp -OutputType Library
+            try { [IO.File]::Move($tmp, $dll) } catch { Remove-Item -LiteralPath $tmp -Force -ErrorAction SilentlyContinue }
+            Get-ChildItem -LiteralPath $dir -Filter "$Name-*.dll" | Where-Object { $_.FullName -ne $dll } | Remove-Item -Force -ErrorAction SilentlyContinue
+        }
+        Add-Type -Path $dll
+    }
+    catch { if (-not ($Name -as [type])) { Add-Type -TypeDefinition $Source } }
+}
+
+# Compiled RDAR index reader: PowerShell loops are too slow for the 600k entries of the base game archives
+function Add-CpRdarType {
+    if ('CpRdar' -as [type]) { return }
+    Import-CpType 'CpRdar' @'
+using System; using System.IO; using System.Collections.Generic;
+public static class CpRdar {
+  public static ulong[] Hashes(string path) {
+    using (var fs = new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.ReadWrite | FileShare.Delete)) {
+      if (fs.Length < 40) return new ulong[0];
+      var br = new BinaryReader(fs);
+      var magic = br.ReadBytes(4);
+      if (magic[0] != 'R' || magic[1] != 'D' || magic[2] != 'A' || magic[3] != 'R') return new ulong[0];
+      br.ReadUInt32();
+      long ip = (long)br.ReadUInt64();
+      if (ip <= 0 || ip + 28 > fs.Length) return new ulong[0];
+      fs.Position = ip + 16;
+      long n = br.ReadUInt32();
+      if (n <= 0 || n > 4000000) return new ulong[0];
+      br.ReadUInt32(); br.ReadUInt32();
+      var buf = br.ReadBytes((int)(n * 56));
+      int count = buf.Length / 56;
+      var outp = new ulong[count];
+      for (int i = 0; i < count; i++) outp[i] = BitConverter.ToUInt64(buf, i * 56);
+      return outp;
+    }
+  }
+  // archive file name holding each wanted hash (first archive in the given order wins)
+  public static Dictionary<ulong, string> Locate(string[] archives, ulong[] targets) {
+    var want = new HashSet<ulong>(targets);
+    var res = new Dictionary<ulong, string>();
+    foreach (var a in archives) {
+      if (res.Count >= want.Count) break;
+      ulong[] hs;
+      try { hs = Hashes(a); } catch { continue; }
+      var name = Path.GetFileName(a);
+      foreach (var h in hs) if (want.Contains(h) && !res.ContainsKey(h)) res[h] = name;
+    }
+    return res;
+  }
+}
+'@
+}
+
+# Resource path hashes from a Cyberpunk .archive (RDAR) index
+function Get-ArchiveHashes([string]$Path) {
+    try { Add-CpRdarType; return , [CpRdar]::Hashes($Path) } catch { }
+    $fs = [IO.File]::Open($Path, 'Open', 'Read', 'ReadWrite')
+    try {
+        $br = [IO.BinaryReader]::new($fs)
+        if ([Text.Encoding]::ASCII.GetString($br.ReadBytes(4)) -ne 'RDAR') { return , [uint64[]]@() }
+        [void]$br.ReadUInt32()
+        $fs.Position = [long]$br.ReadUInt64() + 16
+        $n = [int]$br.ReadUInt32()
+        if ($n -le 0 -or $n -gt 2000000) { return , [uint64[]]@() }
+        [void]$br.ReadUInt32(); [void]$br.ReadUInt32()
+        $buf = $br.ReadBytes($n * 56)
+        $out = [uint64[]]::new($n)
+        for ($i = 0; $i -lt $n; $i++) { $out[$i] = [BitConverter]::ToUInt64($buf, $i * 56) }
+        , $out
+    }
+    finally { $fs.Dispose() }
+}
+
+function Get-CompatIgnore {
+    $f = Join-Path $script:StateDir 'compat-ignore.json'
+    if (Test-Path -LiteralPath $f) { @(Read-JsonFile $f | Where-Object { $_ }) } else { @() }
+}
+function Set-CompatIgnore([string]$Key, [bool]$On) {
+    if (-not $Key) { throw 'Missing issue key' }
+    $l = [Collections.Generic.List[string]]::new([string[]]@(Get-CompatIgnore))
+    if ($On) { if (-not $l.Contains($Key)) { $l.Add($Key) } } else { [void]$l.Remove($Key) }
+    Write-JsonFile (Join-Path $script:StateDir 'compat-ignore.json') @($l)
+    @($l)
+}
+
+$script:RiskNames = @('ok', 'low', 'medium', 'high')
+function Step-Risk([string]$Risk, [int]$By) {
+    $i = [array]::IndexOf($script:RiskNames, $Risk)
+    if ($i -lt 0) { $i = 1 }
+    $script:RiskNames[[Math]::Max(0, [Math]::Min(3, $i + $By))]
+}
+
+# What part of the game a base archive holds, and how much a clash there tends to matter
+function Get-ArchiveArea([string]$Name) {
+    $n = "$Name".ToLower() -replace '\.archive$', ''
+    $a = switch -Regex ($n) {
+        'nightcity_gi' { @('world lighting', 'low'); break }
+        'nightcity_terrain' { @('terrain', 'low'); break }
+        'nightcity' { @('the world map (placed objects, buildings)', 'mid'); break }
+        'appearance' { @('character and item looks (models, textures)', 'low'); break }
+        'gamedata' { @('game data (quests, scenes, menus, gameplay)', 'high'); break }
+        'animation' { @('animations', 'mid'); break }
+        'engine' { @('engine and interface resources', 'high'); break }
+        'mainmenu' { @('the main menu', 'mid'); break }
+        'video' { @('videos', 'low'); break }
+        '^lang_.*voice' { @('voice lines', 'low'); break }
+        '^lang_' { @('text and translations', 'mid'); break }
+        '^audio' { @('sounds and music', 'low'); break }
+        'memoryresident' { @('core resources loaded at startup', 'high'); break }
+        default { @('other game resources', 'mid') }
+    }
+    [ordered]@{ label = $(if ($n.StartsWith('ep1_')) { "Phantom Liberty $($a[0])" } else { $a[0] }); sens = $a[1] }
+}
+
+# Missing requirements, shared files, asset overlaps, replaced script functions, shared tweak records, outdated script mods,
+# author notes; each issue gets a risk (high/medium/low/ok) with the reasons behind it. $Loaded: mod names that loaded cleanly last launch
+function Test-ModCompat([hashtable]$Loaded) {
+    $s = Get-State
+    $set = Get-CpSettings
+    $issues = [Collections.Generic.List[object]]::new()
+    $fws = @(Get-Frameworks)
+    $fwIds = @($fws | ForEach-Object { [int]$_.nexusId })
+    $fwNames = @($fws | ForEach-Object { "$($_.name)" })
+    $byName = @{}
+    foreach ($m in $s.mods) { $byName[$m.name] = $m }
+
+    $owner = @{}
+    foreach ($m in $s.mods) {
+        foreach ($f in @($m.files)) {
+            $k = "$f".ToLower()
+            if (-not $owner.ContainsKey($k)) { $owner[$k] = [Collections.Generic.List[string]]::new() }
+            if (-not $owner[$k].Contains($m.name)) { $owner[$k].Add($m.name) }
+        }
+    }
+
+    # Nexus details first: authors, requirements and descriptions decide how risky an overlap is
+    $ids = @($s.mods | Where-Object { $_.modId } | ForEach-Object { [int]$_.modId } | Sort-Object -Unique)
+    $installed = [Collections.Generic.HashSet[int]]::new([int[]]$ids)
+    $disabledIds = @($s.disabled | Where-Object { $_.modId } | ForEach-Object { [int]$_.modId })
+    $info = @{}
+    for ($i = 0; $i -lt $ids.Count; $i += 40) {
+        $chunk = $ids[$i..([Math]::Min($i + 39, $ids.Count - 1))]
+        $list = ($chunk | ForEach-Object { "{gameDomain: `"$($script:NexusGame)`", modId: $_}" }) -join ', '
+        $d = Invoke-NexusGql "{ legacyModsByDomain(ids: [$list], count: 50) { nodes { modId name author updatedAt uploader { name } description modRequirements { nexusRequirements { nodes { modId modName notes externalRequirement } } } } } }"
+        foreach ($n in $d.legacyModsByDomain.nodes) { $info[[int]$n.modId] = $n }
+    }
+    $nx = { param($name) $m = $byName[$name]; if ($m -and $m.modId) { $info[[int]$m.modId] } else { $null } }
+    $plain = @{}
+    foreach ($k in $info.Keys) { $plain[$k] = [Net.WebUtility]::HtmlDecode(("$($info[$k].description)" -replace '<br\s*/?>', "`n" -replace '\[/?[a-z\*]+[^\]]{0,60}\]', ' ')) }
+    $texts = @{}
+    foreach ($m in $s.mods) {
+        $c = @($m.name)
+        $n = & $nx $m.name
+        if ($n) { $c += "$($n.name)"; $c += ("$($n.name)" -split ' [\(\[\-]')[0] }
+        $texts[$m.name] = @($c | ForEach-Object { "$_".Trim() } | Where-Object { $_.Length -ge 6 } | Sort-Object -Unique)
+    }
+    # reasons two managed mods are meant to coexist: same author, one requires the other, one mentions the other
+    $relation = {
+        param([string]$A, [string]$B)
+        $r = [ordered]@{ same = $null; requires = $null; mention = $null }
+        $na = & $nx $A; $nb = & $nx $B
+        if ($na -and $nb) {
+            $wa = @("$($na.author)", "$($na.uploader.name)") | Where-Object { $_ } | ForEach-Object { $_.Trim().ToLower() }
+            $wb = @("$($nb.author)", "$($nb.uploader.name)") | Where-Object { $_ } | ForEach-Object { $_.Trim().ToLower() }
+            $hit = @($wa | Where-Object { $wb -contains $_ })
+            if ($hit) { $r.same = $(if ($na.author) { "$($na.author)" } else { "$($na.uploader.name)" }) }
+            foreach ($pair in @(@($na, $nb, $A, $B), @($nb, $na, $B, $A))) {
+                $req = @($pair[0].modRequirements.nexusRequirements.nodes | Where-Object { $_ -and [int]$_.modId -eq [int]$pair[1].modId })
+                if ($req) { $r.requires = "$($pair[2]) lists $($pair[3]) as a requirement, so it is built to sit on top of it." }
+            }
+        }
+        foreach ($pair in @(@($A, $B), @($B, $A))) {
+            $n = & $nx $pair[0]
+            if (-not $n -or $r.mention) { continue }
+            $txt = $plain[[int]$n.modId]
+            foreach ($t in $texts[$pair[1]]) { if ($txt -and $txt.IndexOf($t, [StringComparison]::OrdinalIgnoreCase) -ge 0) { $r.mention = "The page of $($pair[0]) mentions $($pair[1]) (often a compatibility note)."; break } }
+        }
+        $r
+    }
+    $kindOf = { param([string]$p) $e = [IO.Path]::GetExtension($p).ToLower(); $leaf = [IO.Path]::GetFileName($p).ToLower()
+        if ($leaf -match '^(license|licence|readme|changelog|third_party_licenses|credits)([\._ -].*)?$' -or $e -in '.md', '.txt', '.url', '.pdf', '.png', '.jpg') { 'doc' }
+        elseif ($e -in '.dll', '.asi', '.exe') { 'code' } elseif ($e -in '.reds', '.lua') { 'script' } elseif ($e -in '.ini', '.json', '.toml', '.xml', '.yaml', '.yml', '.cfg') { 'config' } else { 'data' } }
+
+    # 1. same file installed by several mods
+    # a vanilla backup means the file is a base game file, not a mod's own
+    $base = @{}
+    foreach ($m in $s.mods) { foreach ($b in @($m.backups)) { $base["$b".ToLower()] = $true } }
+    $pairs = @{}
+    foreach ($k in $owner.Keys) {
+        $o = $owner[$k]
+        if ($o.Count -lt 2) { continue }
+        $key = (@($o) | Sort-Object) -join '|'
+        if (-not $pairs.ContainsKey($key)) { $pairs[$key] = [Collections.Generic.List[string]]::new() }
+        $pairs[$key].Add($k)
+    }
+    foreach ($key in $pairs.Keys) {
+        $mods = @($key -split '\|')
+        $files = @($pairs[$key])
+        $kinds = @($files | ForEach-Object { & $kindOf $_ } | Sort-Object -Unique)
+        $why = [Collections.Generic.List[string]]::new()
+        $mids = @($mods | ForEach-Object { $m = $byName[$_]; if ($m -and $m.modId) { [int]$m.modId } else { 0 } } | Sort-Object -Unique)
+        if ($mids.Count -eq 1 -and $mids[0] -gt 0) { $risk = 'ok'; $why.Add('All of them come from the same Nexus mod (for example a main file plus an optional or update file), which is built to replace these files.') }
+        elseif (-not ($kinds | Where-Object { $_ -ne 'doc' })) { $risk = 'ok'; $why.Add('Only documentation such as LICENSE or readme files: nothing the game uses.') }
+        elseif ($kinds -contains 'code') { $risk = 'high'; $why.Add('A program file (.dll or .asi) is shared: only the copy installed last runs, so the other mod may lose part of how it works.') }
+        elseif (@($files | Where-Object { $base.ContainsKey($_) }).Count) { $risk = 'medium'; $why.Add('A base game file is replaced whole by both (for example r6\config input files): only the copy installed last is used, so the other mod loses all its changes to it, such as its key bindings.') }
+        elseif ($kinds -contains 'script') { $risk = 'medium'; $why.Add('A script file is shared: only the copy installed last is used.') }
+        elseif ($kinds -contains 'data') { $risk = 'medium'; $why.Add('A game data file is shared: only the copy installed last is used.') }
+        else { $risk = 'low'; $why.Add('Only settings files are shared: the copy installed last is used, which usually just changes defaults.') }
+        if ($risk -ne 'ok' -and $mods.Count -eq 2) {
+            $rel = & $relation $mods[0] $mods[1]
+            if ($rel.same) { $risk = Step-Risk $risk -1; $why.Add("Same author ($($rel.same)): the overlap is probably on purpose.") }
+        }
+        $issues.Add([ordered]@{ kind = 'files'; level = 'warn'; mods = $mods; risk = $risk; why = @($why); title = "$($mods -join ' and ') install the same file$(if ($files.Count -gt 1) { 's' })"
+                detail = "$($files.Count) file(s), e.g. $($files[0]). The copy installed last is the one in use."; files = @($files | Select-Object -First 8) })
+    }
+
+    # 2. archives replacing the same game assets (load order: alphabetical, first one wins)
+    $archives = @(Get-ChildItem -LiteralPath (Join-Path $script:Game 'archive\pc\mod') -Filter *.archive -File -ErrorAction SilentlyContinue)
+    $archives += @(Get-ChildItem -LiteralPath (Join-Path $script:Game 'mods') -Recurse -Filter *.archive -File -ErrorAction SilentlyContinue)
+    $label = @{}
+    $byHash = [Collections.Generic.Dictionary[uint64, Collections.Generic.List[string]]]::new()
+    foreach ($a in $archives) {
+        $rel = [IO.Path]::GetRelativePath($script:Game, $a.FullName).ToLower()
+        $label[$a.Name] = if ($owner.ContainsKey($rel)) { $owner[$rel][0] } else { "$($a.Name) (not managed by cpmods)" }
+        try { $hs = Get-ArchiveHashes $a.FullName } catch { continue }
+        foreach ($x in $hs) {
+            $l = $null
+            if ($byHash.TryGetValue($x, [ref]$l)) { if (-not $l.Contains($a.Name)) { $l.Add($a.Name) } }
+            else { $byHash[$x] = [Collections.Generic.List[string]]::new([string[]]@($a.Name)) }
+        }
+    }
+    $ov = @{}
+    $ovH = @{}
+    foreach ($kv in $byHash.GetEnumerator()) {
+        if ($kv.Value.Count -lt 2) { continue }
+        $names = [string[]]$kv.Value.ToArray()
+        [Array]::Sort($names, [StringComparer]::Ordinal)
+        for ($i = 0; $i -lt $names.Count; $i++) {
+            for ($j = $i + 1; $j -lt $names.Count; $j++) {
+                if ($label[$names[$i]] -eq $label[$names[$j]]) { continue }
+                $key = "$($names[$i])|$($names[$j])"
+                $ov[$key] = 1 + [int]$ov[$key]
+                if (-not $ovH.ContainsKey($key)) { $ovH[$key] = [Collections.Generic.List[uint64]]::new() }
+                if ($ovH[$key].Count -lt 400) { $ovH[$key].Add($kv.Key) }
+            }
+        }
+    }
+    # which base game archive each shared asset comes from tells what kind of content the two mods fight over
+    $where = @{}
+    if ($ovH.Count) {
+        $want = [Collections.Generic.HashSet[uint64]]::new()
+        foreach ($l in $ovH.Values) { foreach ($x in $l) { [void]$want.Add($x) } }
+        $base = @(Get-ChildItem -LiteralPath (Join-Path $script:Game 'archive\pc') -Recurse -Filter *.archive -File -ErrorAction SilentlyContinue | Where-Object { $_.DirectoryName -notlike '*\archive\pc\mod' } | Sort-Object { if ($_.Name -like 'ep1_*') { 1 } else { 0 } }, Name | ForEach-Object FullName)
+        try { Add-CpRdarType; $loc = [CpRdar]::Locate([string[]]$base, [uint64[]]@($want)); foreach ($kv in $loc.GetEnumerator()) { $where[$kv.Key] = $kv.Value } } catch { }
+    }
+    $prefixRx = '^(#+|!+|_+|\d+[\s_\-.]|z{1,3}(?=[A-Z_\-\s])|z{2,})'
+    foreach ($key in $ov.Keys) {
+        $win, $lose = $key -split '\|'
+        $A = $label[$win]; $B = $label[$lose]
+        $n = $ov[$key]
+        $why = [Collections.Generic.List[string]]::new()
+        $risk = if ($n -le 2) { 'low' } elseif ($n -le 40) { 'medium' } else { 'high' }
+        $why.Add("$n shared asset$(if ($n -ne 1) { 's' }). $win loads first, so $A wins for $(if ($n -eq 1) { 'it' } else { 'those' }) and $B loses its version.")
+        $areas = @{}; $newOnes = 0
+        foreach ($x in $ovH[$key]) {
+            $an = $where[$x]
+            if (-not $an) { $newOnes++; continue }
+            $ar = Get-ArchiveArea $an
+            $prev = $areas[$ar.label]
+            $areas[$ar.label] = @($(if ($prev) { $prev[0] + 1 } else { 1 }), $ar.sens)
+        }
+        $areaList = @($areas.Keys | Sort-Object { - $areas[$_][0] })
+        if ($ovH[$key].Count -and -not $areaList.Count) { $risk = Step-Risk $risk -1; $why.Add('The shared files are not part of the base game: both mods ship the same extra file, often a common resource.') }
+        elseif ($areaList.Count) {
+            $sens = @($areaList | ForEach-Object { $areas[$_][1] })
+            $txt = ($areaList | Select-Object -First 2) -join ' and '
+            if ($sens -contains 'high') { $why.Add("They touch $txt, so a quest, scene, menu or gameplay value follows one mod instead of the other.") }
+            elseif (-not ($sens | Where-Object { $_ -ne 'low' })) { $risk = Step-Risk $risk -1; $why.Add("They only touch ${txt}: at worst you see one mod's version instead of the other's.") }
+            else { $why.Add("They touch ${txt}: objects can look or sit differently than one of the mods intends.") }
+        }
+        $managed = $byName.ContainsKey($A) -and $byName.ContainsKey($B)
+        if ($managed) {
+            $rel = & $relation $A $B
+            if ($rel.same) { $risk = 'ok'; $why.Add("Same author ($($rel.same)): the overlap is almost certainly on purpose.") }
+            if ($rel.requires) { $risk = 'ok'; $why.Add($rel.requires) }
+            if ($rel.mention -and $risk -ne 'ok') { $risk = Step-Risk $risk -1; $why.Add($rel.mention) }
+        }
+        $pref = @($win, $lose | Where-Object { $_ -cmatch $prefixRx })
+        if ($pref -and $risk -ne 'ok') { $risk = Step-Risk $risk -1; $why.Add("$($pref[0]) starts with a load-order prefix (#, !, z), a sign the author chose on purpose which one wins.") }
+        elseif ($pref) { $why.Add("$($pref[0]) starts with a load-order prefix, so the author chose which one wins.") }
+        $issues.Add([ordered]@{ kind = 'archive'; level = 'warn'; mods = @($A, $B); risk = $risk; why = @($why); winner = $A; files = @($win, $lose); areas = $areaList
+                title = "$A and $B change the same game assets"
+                detail = "$n shared asset(s). $win loads first, so $A probably wins for those and $B loses its version of them." })
+    }
+
+    # 3. Nexus requirements
+    $seen = [Collections.Generic.HashSet[string]]::new()
+    foreach ($m in $s.mods | Where-Object { "$($_.source)" -match 'nexus:' }) {
+        $n = $info[[int]$m.modId]
+        if (-not $n) { continue }
+        foreach ($r in @($n.modRequirements.nexusRequirements.nodes)) {
+            if (-not $r -or $r.externalRequirement -or -not $r.modId) { continue }
+            $rid = [int]$r.modId
+            if ($installed.Contains($rid) -or -not $seen.Add("$($m.modId)-$rid")) { continue }
+            $notes = "$($r.notes)".Trim()
+            $optional = $notes -match '(?i)optional|only (if|for|needed|required)|not required|recommended'
+            $lvl = if ($disabledIds -contains $rid) { 'warn' } elseif ($optional) { 'info' } else { 'error' }
+            $risk = @{ error = 'high'; warn = 'medium'; info = 'low' }[$lvl]
+            $why = switch ($lvl) {
+                'error' { 'The mod (or part of it) does not work without it.' }
+                'warn' { 'It is installed but switched off.' }
+                default { 'The author marks it as optional or only needed for some features.' }
+            }
+            $det = if ($lvl -eq 'warn') { 'It is installed but disabled.' } elseif ($optional) { "Author note: $notes" } else { 'Not installed. The mod (or part of it) will not work without it.' + $(if ($notes) { " Author note: $notes" } else { '' }) }
+            $issues.Add([ordered]@{ kind = 'requirement'; level = $lvl; mods = @($m.name); reqId = $rid; reqName = "$($r.modName)"; risk = $risk; why = @($why); title = "$($m.name) needs $($r.modName)"; detail = $det })
+        }
+    }
+
+    # 4. two mods replacing the same script function: only one replacement can be active
+    $repl = @{}
+    $tweakRec = @{}
+    # redscript modules present (parents included), for @if(ModuleExists("X")) guards
+    $modules = [Collections.Generic.HashSet[string]]::new([StringComparer]::OrdinalIgnoreCase)
+    foreach ($d in 'r6\scripts', 'red4ext\plugins') {
+        Get-ChildItem -LiteralPath (Join-Path $script:Game $d) -Recurse -Filter *.reds -File -ErrorAction SilentlyContinue | Select-String -Pattern '^\s*module\s+([\w.]+)' -List |
+            ForEach-Object { $n = $_.Matches[0].Groups[1].Value; while ($n) { [void]$modules.Add($n); $n = $n -replace '\.?[^.]*$', '' } }
+    }
+    $guardOn = { param([string]$g) foreach ($c in [regex]::Matches($g, '(!?)\s*ModuleExists\(\s*"([^"]+)"')) { if ($modules.Contains($c.Groups[2].Value) -eq [bool]$c.Groups[1].Value) { return $false } }; $true }
+    $guard = '((?:@if\(\s*!?\s*ModuleExists\(\s*"[^"]+"\s*\)\s*\)\s*)*)'
+    foreach ($m in $s.mods) {
+        foreach ($f in @($m.files)) {
+            $fl = "$f".ToLower()
+            $p = Join-Path $script:Game $f
+            if ($fl.EndsWith('.reds') -and $fl.StartsWith('r6\scripts\')) {
+                try { $txt = [IO.File]::ReadAllText($p) } catch { continue }
+                $txt = $txt -replace '(?s)/\*.*?\*/', '' -replace '(?m)//.*$', ''
+                foreach ($x in [regex]::Matches($txt, $guard + '@replaceMethod\(\s*(\w+)\s*\)\s*(?:(?:public|private|protected|final|static|native|cb|exec|quest|const|importonly)\s+)*func\s+(\w+)')) {
+                    if (-not (& $guardOn $x.Groups[1].Value)) { continue }
+                    $k = "$($x.Groups[2].Value).$($x.Groups[3].Value)"
+                    if (-not $repl[$k]) { $repl[$k] = [Collections.Generic.List[string]]::new() }
+                    if (-not $repl[$k].Contains($m.name)) { $repl[$k].Add($m.name) }
+                }
+                foreach ($x in [regex]::Matches($txt, $guard + '@replaceGlobal\(\s*\)\s*(?:(?:public|private|protected|final|static|native|exec|quest)\s+)*func\s+(\w+)')) {
+                    if (-not (& $guardOn $x.Groups[1].Value)) { continue }
+                    $k = "$($x.Groups[2].Value)"
+                    if (-not $repl[$k]) { $repl[$k] = [Collections.Generic.List[string]]::new() }
+                    if (-not $repl[$k].Contains($m.name)) { $repl[$k].Add($m.name) }
+                }
+            }
+            elseif (($fl.StartsWith('r6\tweaks\') -or $fl.StartsWith('red4ext\plugins\')) -and $fl -match '\.(yaml|yml)$') {
+                try { $lines = [IO.File]::ReadAllLines($p) } catch { continue }
+                foreach ($ln in $lines) {
+                    if ($ln -match '^([A-Za-z_][\w.]*)\s*:') {
+                        $k = $Matches[1]
+                        if (-not $tweakRec[$k]) { $tweakRec[$k] = [Collections.Generic.List[string]]::new() }
+                        if (-not $tweakRec[$k].Contains($m.name)) { $tweakRec[$k].Add($m.name) }
+                    }
+                }
+            }
+        }
+    }
+    $rp = @{}
+    foreach ($k in $repl.Keys) { if ($repl[$k].Count -ge 2) { $pk = (@($repl[$k]) | Sort-Object) -join '|'; if (-not $rp[$pk]) { $rp[$pk] = [Collections.Generic.List[string]]::new() }; $rp[$pk].Add($k) } }
+    foreach ($pk in $rp.Keys) {
+        $mods = @($pk -split '\|'); $fns = @($rp[$pk])
+        $why = [Collections.Generic.List[string]]::new()
+        $why.Add("Both replace $($fns.Count) game function$(if ($fns.Count -gt 1) { 's' }) completely ($(($fns | Select-Object -First 3 | ForEach-Object { "$_()" }) -join ', ')$(if ($fns.Count -gt 3) { ', ...' })). Only one replacement can be active, so one mod loses that change.")
+        $risk = 'high'
+        if ($mods.Count -eq 2) { $rel = & $relation $mods[0] $mods[1]; if ($rel.same) { $risk = 'low'; $why.Add("Same author ($($rel.same)): probably designed to work together.") } elseif ($rel.mention) { $risk = 'medium'; $why.Add($rel.mention) } }
+        $issues.Add([ordered]@{ kind = 'script'; level = 'warn'; mods = $mods; risk = $risk; why = @($why); functions = $fns; title = "$($mods -join ' and ') replace the same script function$(if ($fns.Count -gt 1) { 's' })"
+                detail = "Keep the one you care about more, or look for a compatibility patch on Nexus." })
+    }
+
+    # 5. tweak files editing the same game database records
+    $tp = @{}
+    foreach ($k in $tweakRec.Keys) { if ($tweakRec[$k].Count -ge 2) { $pk = (@($tweakRec[$k]) | Sort-Object) -join '|'; if (-not $tp[$pk]) { $tp[$pk] = [Collections.Generic.List[string]]::new() }; $tp[$pk].Add($k) } }
+    foreach ($pk in $tp.Keys) {
+        $mods = @($pk -split '\|'); $recs = @($tp[$pk])
+        $risk = if ($recs.Count -gt 25) { 'medium' } else { 'low' }
+        $why = [Collections.Generic.List[string]]::new()
+        $why.Add("$($recs.Count) shared database entr$(if ($recs.Count -eq 1) { 'y' } else { 'ies' }), e.g. $($recs[0]). When both set the same value, only one wins; added list items are usually merged.")
+        if ($mods.Count -eq 2) { $rel = & $relation $mods[0] $mods[1]; if ($rel.same -or $rel.requires) { $risk = 'ok'; $why.Add($(if ($rel.same) { "Same author ($($rel.same))." } else { $rel.requires })) } }
+        $issues.Add([ordered]@{ kind = 'tweak'; level = 'info'; mods = $mods; risk = $risk; why = @($why); records = @($recs | Select-Object -First 12); title = "$($mods -join ' and ') edit the same game database entries"
+                detail = 'TweakXL applies both; usually fine unless both change the exact same stat.' })
+    }
+
+    # 6. script and plugin mods not updated since the current patch
+    $epoch = [DateTimeOffset]::FromUnixTimeSeconds([long]$set.patchEpoch).UtcDateTime
+    foreach ($m in $s.mods) {
+        if (-not $m.modId -or $fwIds -contains [int]$m.modId -or $fwNames -contains $m.name -or "$($m.source)" -notmatch '^nexus:') { continue }
+        $n = $info[[int]$m.modId]
+        if (-not $n -or -not $n.updatedAt) { continue }
+        $upd = try { ([datetimeoffset]"$($n.updatedAt)").UtcDateTime } catch { $null }
+        if (-not $upd -or $upd -ge $epoch) { continue }
+        $fl = @($m.files | ForEach-Object { "$_".ToLower() })
+        $native = [bool]($fl | Where-Object { ($_.StartsWith('red4ext\plugins\') -and $_.EndsWith('.dll')) -or $_.EndsWith('.asi') })
+        $code = $native -or [bool]($fl | Where-Object { $_.EndsWith('.reds') -or ($_.StartsWith('bin\x64\plugins\cyber_engine_tweaks\mods\') -and $_.EndsWith('.lua')) })
+        if (-not $code) { continue }
+        $risk = if ($native) { 'high' } else { 'medium' }
+        $why = [Collections.Generic.List[string]]::new()
+        $why.Add("Last updated $($upd.ToLocalTime().ToString('d MMM yyyy', [Globalization.CultureInfo]::InvariantCulture)), before $($set.patchLabel) came out.")
+        $why.Add($(if ($native) { 'It has a native plugin (.dll): these hook into the game''s code and usually break when the game updates.' } else { 'It runs scripts: many keep working after a patch, some break.' }))
+        if ($Loaded -and $Loaded.ContainsKey($m.name)) { $risk = Step-Risk $risk -1; $why.Add('It loaded without errors on your last launch.') }
+        $issues.Add([ordered]@{ kind = 'outdated'; level = 'info'; mods = @($m.name); risk = $risk; why = @($why); version = "$($m.version)"; title = "$($m.name) was not updated for $($set.patchLabel)"
+                detail = 'Check the Posts and Bugs tabs on its Nexus page if something misbehaves.' })
+    }
+
+    # 7. author notes mentioning another installed mod near compatibility words
+    $noted = [Collections.Generic.HashSet[string]]::new()
+    foreach ($m in $s.mods | Where-Object { "$($_.source)" -match 'nexus:' }) {
+        $n = $info[[int]$m.modId]
+        if (-not $n -or -not $n.description) { continue }
+        $lines = $plain[[int]$m.modId] -split '[\r\n]+|(?<=[\.!?])\s+' | Where-Object { $_ -match '(?i)incompatib|not compatible|conflicts? with|do not use (it |this )?with|don''t use (it |this )?with|(won''t|does not|doesn''t) work with' }
+        foreach ($line in $lines) {
+            foreach ($other in $s.mods) {
+                if ($other.name -eq $m.name -or ($other.modId -and [int]$other.modId -eq [int]$m.modId) -or ($other.modId -and $fwIds -contains [int]$other.modId)) { continue }
+                $hitText = $texts[$other.name] | Where-Object { $line -match [regex]::Escape($_) } | Select-Object -First 1
+                if (-not $hitText -or -not $noted.Add("$($m.name)|$($other.name)")) { continue }
+                $q = $line.Trim(); if ($q.Length -gt 280) { $q = $q.Substring(0, 280) + '...' }
+                $positive = $q -match '(?i)\b(is|are|now|fully)\s+compatible|works? (fine |well )?with|patch for|compatibility patch'
+                $negative = $q -match '(?i)incompatib|not compatible|do not use|don''t use|won''t work|does not work|doesn''t work'
+                $risk = if ($positive -and -not $negative) { 'low' } else { 'medium' }
+                $why = @("The author of $($m.name) writes about $($other.name) in a sentence about compatibility. Read it to see whether it is a warning or a note that they work together.")
+                $issues.Add([ordered]@{ kind = 'note'; level = 'info'; mods = @($m.name, $other.name); risk = $risk; why = $why; title = "The author of $($m.name) mentions $($other.name)"; detail = "`"$q`"" })
+            }
+        }
+    }
+
+    $ign = [Collections.Generic.HashSet[string]]::new([string[]]@(Get-CompatIgnore))
+    foreach ($it in $issues) {
+        $tail = switch ($it.kind) { 'requirement' { "$($it.reqId)" } 'outdated' { "$($it.version)" } default { '' } }
+        $it.key = "$($it.kind)|$((@($it.mods) | Sort-Object) -join '|')|$tail"
+        $it.ignored = $ign.Contains($it.key)
+    }
+    $lo = Get-LoadOrderRules
+    [ordered]@{ checked = (Get-Date).ToString('s'); mods = $s.mods.Count; archives = $archives.Count; assets = $byHash.Count; issues = @($issues); loadOrder = @($lo.Values) }
+}
+#endregion
+
+#region discovery of mods installed outside cpmods
+$script:FwRules = @(
+    @{ name = 'RED4ext'; marker = 'red4ext\RED4ext.dll'; owns = @('bin\x64\winmm.dll', 'red4ext\RED4ext.dll', 'red4ext\LICENSE.txt', 'red4ext\THIRD_PARTY_LICENSES.txt') }
+    @{ name = 'Cyber Engine Tweaks'; marker = 'bin\x64\plugins\cyber_engine_tweaks.asi'; owns = @('bin\x64\version.dll', 'bin\x64\global.ini', 'bin\x64\LICENSE', 'bin\x64\plugins\cyber_engine_tweaks.asi') }
+    @{ name = 'redscript'; marker = 'engine\tools\scc.exe'; owns = @() }
+    @{ name = 'ArchiveXL'; marker = 'red4ext\plugins\ArchiveXL'; owns = @() }
+    @{ name = 'TweakXL'; marker = 'red4ext\plugins\TweakXL'; owns = @() }
+    @{ name = 'Codeware'; marker = 'red4ext\plugins\Codeware'; owns = @() }
+    @{ name = 'Mod Settings'; marker = 'red4ext\plugins\mod_settings'; owns = @() }
+    @{ name = 'Input Loader'; marker = 'red4ext\plugins\input_loader'; owns = @() }
+)
+$script:FwPluginDirs = @('archivexl', 'tweakxl', 'codeware', 'mod_settings', 'input_loader')
+
+function Get-NameWords([string]$N) {
+    $t = ([IO.Path]::GetFileName("$N") -replace '\.(archive|xl|reds|lua|xml|yaml|yml|asi|dll)$', '' -replace '^[#!_\-\s0-9]+', '' -creplace '([a-z])([A-Z])', '$1 $2') -replace '[^A-Za-z0-9]+', ' '
+    @($t.ToLower().Split(' ', [StringSplitOptions]::RemoveEmptyEntries) | Where-Object { $_.Length -ge 3 -and $_ -notin 'mod', 'mods', 'the', 'and', 'for', 'archive' })
+}
+
+function Get-NameSim($Words, [string]$Name) {
+    $w = @($Words)
+    if (-not $w.Count) { return 0 }
+    $c = ("$Name".ToLower() -replace '[^a-z0-9]', '')
+    @($w | Where-Object { $c.Contains($_) }).Count / $w.Count
+}
+
+function Get-NexusModInfo([int[]]$Ids) {
+    $info = @{}
+    $Ids = @($Ids | Where-Object { $_ -gt 0 } | Sort-Object -Unique)
+    for ($i = 0; $i -lt $Ids.Count; $i += 40) {
+        $chunk = $Ids[$i..([Math]::Min($i + 39, $Ids.Count - 1))]
+        $list = ($chunk | ForEach-Object { "{gameDomain: `"$($script:NexusGame)`", modId: $_}" }) -join ', '
+        try { $d = Invoke-NexusGql "{ legacyModsByDomain(ids: [$list], count: 50) { nodes { modId name version updatedAt thumbnailUrl } } }"; foreach ($n in $d.legacyModsByDomain.nodes) { $info[[int]$n.modId] = $n } } catch { }
+    }
+    $info
+}
+
+function Get-UnitKey([string]$N) {
+    $b = [IO.Path]::GetFileName($N)
+    while ([IO.Path]::GetExtension($b) -match '^\.(archive|xl|reds|lua|xml|yaml|yml|asi|dll|toml)$') { $b = [IO.Path]::GetFileNameWithoutExtension($b) }
+    ($b.ToLower() -replace '^[#!_\-\s0-9]+', '' -replace '[^a-z0-9]', '')
+}
+
+# Groups untracked mod files into mods and identifies them on Nexus by exact file path
+function Find-ExistingMods([switch]$IncludeTracked) {
+    $g = $script:Game
+    $s = Get-State
+    $tracked = [Collections.Generic.HashSet[string]]::new([StringComparer]::OrdinalIgnoreCase)
+    if (-not $IncludeTracked) { foreach ($m in $s.mods) { foreach ($f in @($m.files)) { [void]$tracked.Add("$f") } } }
+    # folders that hold tracked files: anything else inside them is that mod's own runtime data (settings, db)
+    $ownedDirs = [Collections.Generic.HashSet[string]]::new([StringComparer]::OrdinalIgnoreCase)
+    foreach ($t in $tracked) { $p = Split-Path $t; while ($p) { if (-not $ownedDirs.Add($p)) { break }; $p = Split-Path $p } }
+    $rel = { param($p) [IO.Path]::GetRelativePath($g, $p) }
+    $skip = { param($r) $r -match '(?i)\.log$|\\logs?\\|\.part$|\\__pycache__\\' -or $tracked.Contains($r) }
+    $units = [ordered]@{}
+    $add = {
+        param([string]$Key, [string]$Display, [string]$Root, [string[]]$Files)
+        if ($Root -and $ownedDirs.Contains($Root)) { return }
+        $Files = @($Files | Where-Object { -not (& $skip $_) })
+        if (-not $Files -or -not $Key) { return }
+        if (-not $units.Contains($Key)) { $units[$Key] = [ordered]@{ key = $Key; display = $Display; roots = [Collections.Generic.List[string]]::new(); files = [Collections.Generic.List[string]]::new() } }
+        $u = $units[$Key]
+        if ($Root -and -not $u.roots.Contains($Root)) { $u.roots.Add($Root) }
+        foreach ($f in $Files) { if (-not $u.files.Contains($f)) { $u.files.Add($f) } }
+    }
+    $filesUnder = { param($d) @(Get-ChildItem -LiteralPath $d -Recurse -File -Force -ErrorAction SilentlyContinue | ForEach-Object { & $rel $_.FullName }) }
+
+    $frameworks = foreach ($r in $script:FwRules) {
+        $present = Test-Path -LiteralPath (Join-Path $g $r.marker)
+        $managed = [bool]($s.mods | Where-Object { $_.name -eq $r.name })
+        if ($present) { [ordered]@{ name = $r.name; managed = $managed } }
+    }
+    $fwOwned = [Collections.Generic.HashSet[string]]::new([StringComparer]::OrdinalIgnoreCase)
+    foreach ($r in $script:FwRules) { foreach ($o in $r.owns) { [void]$fwOwned.Add($o) } }
+
+    $am = Join-Path $g 'archive\pc\mod'
+    foreach ($f in Get-ChildItem -LiteralPath $am -File -ErrorAction SilentlyContinue) {
+        $r = & $rel $f.FullName
+        & $add (Get-UnitKey $f.Name) ([IO.Path]::GetFileNameWithoutExtension($f.Name) -replace '\.archive$', '') $r @($r)
+    }
+    foreach ($sub in 'r6\scripts', 'r6\tweaks', 'r6\input') {
+        foreach ($e in Get-ChildItem -LiteralPath (Join-Path $g $sub) -Force -ErrorAction SilentlyContinue) {
+            $r = & $rel $e.FullName
+            $files = if ($e.PSIsContainer) { & $filesUnder $e.FullName } else { @($r) }
+            & $add (Get-UnitKey $e.Name) ($e.Name -replace '\.(reds|yaml|yml|xml)$', '') $r $files
+        }
+    }
+    foreach ($d in Get-ChildItem -LiteralPath (Join-Path $g 'bin\x64\plugins\cyber_engine_tweaks\mods') -Directory -ErrorAction SilentlyContinue) {
+        & $add (Get-UnitKey $d.Name) $d.Name (& $rel $d.FullName) (& $filesUnder $d.FullName)
+    }
+    foreach ($d in Get-ChildItem -LiteralPath (Join-Path $g 'red4ext\plugins') -Directory -ErrorAction SilentlyContinue) {
+        if ($script:FwPluginDirs -contains $d.Name.ToLower()) { continue }
+        & $add (Get-UnitKey $d.Name) $d.Name (& $rel $d.FullName) (& $filesUnder $d.FullName)
+    }
+    foreach ($d in Get-ChildItem -LiteralPath (Join-Path $g 'mods') -Directory -ErrorAction SilentlyContinue) {
+        & $add ('redmod' + (Get-UnitKey $d.Name)) $d.Name (& $rel $d.FullName) (& $filesUnder $d.FullName)
+    }
+    foreach ($f in @(Get-ChildItem -LiteralPath (Join-Path $g 'bin\x64\plugins') -Filter *.asi -File -ErrorAction SilentlyContinue) + @(Get-ChildItem -LiteralPath (Join-Path $g 'bin\x64') -Filter *.asi -File -ErrorAction SilentlyContinue)) {
+        $r = & $rel $f.FullName
+        if ($fwOwned.Contains($r)) { continue }
+        & $add (Get-UnitKey $f.Name) $f.BaseName $r @($r)
+    }
+
+    # Vortex deployment manifest: those files stay with Vortex
+    $vortex = @{}
+    $vf = Join-Path $g 'vortex.deployment.json'
+    if (Test-Path -LiteralPath $vf) {
+        try { foreach ($e in @(([IO.File]::ReadAllText($vf) | ConvertFrom-Json).files)) { if ($e.relPath) { $vortex["$($e.relPath)".ToLower()] = "$($e.source)" } } } catch { }
+    }
+
+    # identify on Nexus: up to 3 distinctive files per mod, exact path lookups batched with aliases
+    $order = @('.archive', '.reds', '.lua', '.dll', '.asi', '.yaml', '.yml', '.xl', '.xml', '.json')
+    $probes = [Collections.Generic.List[object]]::new()
+    foreach ($u in $units.Values) {
+        $pool = @($u.files | Where-Object { [IO.Path]::GetExtension($_).ToLower() -notin '.sqlite3', '.json', '.log', '.txt', '.md', '.ini' })
+        if (-not $pool) { $pool = @($u.files) }
+        $pick = @($pool | Sort-Object { $i = [array]::IndexOf($order, [IO.Path]::GetExtension($_).ToLower()); if ($i -lt 0) { 99 } else { $i } }, { $_.Length } | Select-Object -First 3)
+        foreach ($p in $pick) { $probes.Add(@{ key = $u.key; path = ($p -replace '\\', '/') }) }
+    }
+    $votes = @{}
+    for ($i = 0; $i -lt $probes.Count; $i += 20) {
+        $chunk = @($probes[$i..([Math]::Min($i + 19, $probes.Count - 1))])
+        $defs = @(); $sel = @(); $vars = @{}
+        for ($j = 0; $j -lt $chunk.Count; $j++) {
+            $defs += "`$f$j`: ModFileContentSearchFilter"
+            $sel += "p$j`: modFileContents(filter: `$f$j, count: 60) { nodes { modId } }"
+            $vars["f$j"] = @{ gameId = @{ value = 3333; op = 'EQUALS' }; filePathWildcard = @{ value = $chunk[$j].path; op = 'EQUALS' } }
+        }
+        try { $d = Invoke-NexusGql ("query(" + ($defs -join ', ') + ") { " + ($sel -join ' ') + " }") $vars } catch { Write-Note "Identify batch failed: $($_.Exception.Message)"; continue }
+        for ($j = 0; $j -lt $chunk.Count; $j++) {
+            foreach ($n in @($d."p$j".nodes)) {
+                if (-not $n) { continue }
+                $k = $chunk[$j].key
+                if (-not $votes[$k]) { $votes[$k] = @{} }
+                $votes[$k][[int]$n.modId] = 1 + [int]$votes[$k][[int]$n.modId]
+            }
+        }
+    }
+
+    # pick per unit: file votes, name similarity breaks ties against modlist/config uploads that re-bundle files
+    $bundleRx = '(?i)\b(config|configuration|modlist|mod list|collections?|repack|compilation|bundle|merged|settings files|repository|deleted)\b'
+    $cand = @{}
+    foreach ($k in $votes.Keys) { $cand[$k] = @($votes[$k].GetEnumerator() | Sort-Object Value -Descending | Select-Object -First 6) }
+    $info = Get-NexusModInfo @($cand.Values | ForEach-Object { $_ } | ForEach-Object { [int]$_.Key } | Sort-Object -Unique)
+    $groups = [Collections.Generic.List[object]]::new()
+    foreach ($u in $units.Values) {
+        $best = 0; $bestScore = -1e9
+        $c = $cand[$u.key]
+        if ($c) {
+            $words = Get-NameWords $u.display
+            $max = [double]($c | Measure-Object Value -Maximum).Maximum
+            foreach ($e in $c) {
+                $nm = "$($info[[int]$e.Key].name)"
+                $score = 100 * (Get-NameSim $words $nm) + 20 * $e.Value / $max - $(if ($nm -match $bundleRx) { 60 } else { 0 })
+                if ($score -gt $bestScore) { $bestScore = $score; $best = [int]$e.Key }
+            }
+        }
+        $vsrc = $null
+        foreach ($f in $u.files) { $x = $vortex[$f.ToLower()]; if ($x) { $vsrc = $x; break } }
+        $groups.Add([ordered]@{ modId = $best; match = $(if ($best) { 'files' } else { '' }); name = ($u.display -replace '^[#!_\-\s0-9]+', ''); vortex = $vsrc; roots = @($u.roots); files = @($u.files) })
+    }
+
+    # fallback: search Nexus by name (newest uploads are not in the file index yet)
+    $tries = 0
+    foreach ($e in @($groups | Where-Object { -not $_.modId })) {
+        $words = Get-NameWords $e.name
+        if (-not $words -or $tries -ge 30) { continue }
+        $tries++
+        try {
+            $d = Invoke-NexusGql 'query($f: ModsFilter) { mods(filter: $f, count: 6, sort: [{endorsements: {direction: DESC}}]) { nodes { modId name version updatedAt thumbnailUrl } } }' @{ f = @{ gameDomainName = @(@{ value = $script:NexusGame; op = 'EQUALS' }); nameStemmed = @(@{ value = ($words -join ' '); op = 'MATCHES' }); tag = @(@{ value = 'Translation'; op = 'NOT_EQUALS' }) } }
+        }
+        catch { continue }
+        $hit = @($d.mods.nodes) | Where-Object { $_ -and (Get-NameSim $words "$($_.name)") -ge 1 -and "$($_.name)" -notmatch $bundleRx } | Select-Object -First 1
+        if ($hit) { $e.modId = [int]$hit.modId; $e.match = 'name'; $info[[int]$hit.modId] = $hit }
+    }
+
+    # merge pieces that belong to the same Nexus mod
+    $byMod = [ordered]@{}
+    foreach ($e in $groups) {
+        $gk = if ($e.modId) { "m$($e.modId)" } else { 'u' + (Get-UnitKey $e.name) + $byMod.Count }
+        if (-not $byMod.Contains($gk)) { $byMod[$gk] = [ordered]@{ id = $gk; modId = $e.modId; match = $e.match; name = $e.name; vortex = $e.vortex; roots = [Collections.Generic.List[string]]::new(); files = [Collections.Generic.List[string]]::new() } }
+        $t = $byMod[$gk]
+        if ($e.match -eq 'files') { $t.match = 'files' }
+        if ($e.vortex -and -not $t.vortex) { $t.vortex = $e.vortex }
+        foreach ($r in $e.roots) { if (-not $t.roots.Contains($r)) { $t.roots.Add($r) } }
+        foreach ($f in $e.files) { if (-not $t.files.Contains($f)) { $t.files.Add($f) } }
+    }
+    $missing = @($byMod.Values | Where-Object { $_.modId -and -not $info[$_.modId] } | ForEach-Object { $_.modId })
+    if ($missing) { $more = Get-NexusModInfo $missing; foreach ($k in $more.Keys) { $info[$k] = $more[$k] } }
+    $fwIds = @(Get-Frameworks | ForEach-Object { [int]$_.nexusId })
+    $mods = foreach ($e in $byMod.Values) {
+        $n = if ($e.modId) { $info[$e.modId] }
+        [ordered]@{
+            id = $e.id; modId = $e.modId; name = $(if ($n) { "$($n.name)" } else { $e.name }); guess = $e.name; match = $e.match
+            identified = [bool]$n; framework = [bool]($e.modId -and $fwIds -contains $e.modId); latest = $(if ($n) { "$($n.version)" }); updatedAt = $(if ($n) { $n.updatedAt })
+            thumb = $(if ($n) { $n.thumbnailUrl }); vortex = $e.vortex; roots = @($e.roots); files = @($e.files); fileCount = $e.files.Count
+        }
+    }
+    [ordered]@{ scanned = (Get-Date).ToString('s'); frameworks = @($frameworks); mods = @($mods | Sort-Object { -not $_.identified }, { $_.name }) }
+}
+
+# Starts tracking mods found by Find-ExistingMods (files only, nothing is copied)
+function Add-AdoptedMods($Items) {
+    Assert-GameReady
+    $s = Get-State
+    $tracked = [Collections.Generic.HashSet[string]]::new([StringComparer]::OrdinalIgnoreCase)
+    foreach ($m in $s.mods) { foreach ($f in @($m.files)) { [void]$tracked.Add("$f") } }
+    $done = @()
+    foreach ($it in @($Items)) {
+        $files = [Collections.Generic.List[string]]::new()
+        foreach ($f in @($it.files)) {
+            $r = "$f"
+            if ($r -match '\.\.|^[\\/]|:' ) { continue }
+            if ($tracked.Contains($r) -or -not (Test-Path -LiteralPath (Join-Path $script:Game $r) -PathType Leaf)) { continue }
+            $files.Add($r); [void]$tracked.Add($r)
+        }
+        if (-not $files.Count) { continue }
+        $name = "$($it.name)".Trim()
+        if (-not $name) { $name = 'Existing mod' }
+        $base = $name; $n = 2
+        while ($s.mods | Where-Object { $_.name -eq $name }) { $name = "$base ($n)"; $n++ }
+        $dirs = @($it.roots | Where-Object { $_ -and $_ -notmatch '\.\.' -and (Test-Path -LiteralPath (Join-Path $script:Game $_) -PathType Container) })
+        $mid = [int]$it.modId
+        $s.mods.Add([ordered]@{
+                name = $name; version = $null; source = $(if ($mid) { "adopted:nexus:$mid" } else { 'adopted' }); modId = $(if ($mid) { $mid } else { $null }); fileId = $null
+                fileName = $null; sha256 = $null; archive = $null; sub = $null; adopted = $true; installed = (Get-Date).ToString('s')
+                files = $files; backups = @(); dirs = $dirs
+            })
+        $done += $name
+    }
+    Save-State $s
+    Write-Note "Adopted $($done.Count) existing mod(s): $($done -join ', ')" Green
+    $done
+}
+#endregion
+
+#region sharing
+function Export-ModList {
+    $s = Get-State
+    [ordered]@{
+        format = 'cpmods-modlist'; version = 1; game = (Get-GameState).version; created = (Get-Date).ToString('s')
+        mods = @($s.mods | Where-Object { "$($_.source)".StartsWith('nexus:') -and $_.fileId } | Sort-Object { $_.name } | ForEach-Object {
+                [ordered]@{ name = $_.name; modId = [int]$_.modId; fileId = [int]$_.fileId; version = $_.version; sub = $_.sub } })
+    }
+}
+
+# Adds Nexus files to the queue, skipping ones already installed or queued
+function Add-QueueItems($Items, [string]$Why) {
+    Use-Lock {
+        $s = Get-State
+        $q = [Collections.Generic.List[object]]::new([object[]]@(Get-Queue))
+        $added = 0; $skipped = 0
+        foreach ($it in @($Items)) {
+            if (-not $it) { continue }
+            $fid = [int]$it.fileId; $mid = [int]$it.modId
+            if ($fid -le 0 -or $mid -le 0) { continue }
+            if ($s.mods | Where-Object { [int]$_.fileId -eq $fid }) { $skipped++; continue }
+            foreach ($old in @($q | Where-Object { [int]$_.fileId -eq $fid -and $_.done })) { [void]$q.Remove($old) }
+            if ($q | Where-Object { [int]$_.fileId -eq $fid }) { $skipped++; continue }
+            $q.Add([ordered]@{ modId = $mid; fileId = $fid; name = "$($it.name)"; why = $(if ($it.why) { "$($it.why)" } else { $Why }); sub = $(if ($it.sub) { "$($it.sub)" } else { $null }); done = $false })
+            $added++
+        }
+        Save-Queue $q
+        [ordered]@{ added = $added; skipped = $skipped }
+    }
+}
+
+# Zip for friends: app files (no keys, state or downloads) + Install.cmd + your mod list
+function New-CpPackage([string]$OutDir, [switch]$NoModList, [string]$SettingsZip) {
+    if (-not $OutDir) { $OutDir = [Environment]::GetFolderPath('Desktop') }
+    $stage = Join-Path $script:TmpDir ('pkg-' + [guid]::NewGuid().ToString('N'))
+    $app = Join-Path $stage 'cpmods'
+    [void](New-Item -ItemType Directory -Force -Path (Join-Path $app 'lib'), (Join-Path $app 'ui'), (Join-Path $app 'ui-beta'))
+    try {
+        Copy-Item -Path (Join-Path $script:Root 'lib\*.psm1'), (Join-Path $script:Root 'lib\cpwindow.ps1') -Destination (Join-Path $app 'lib')
+        Copy-Item -LiteralPath (Join-Path $script:Root 'lib\webview2') -Destination (Join-Path $app 'lib') -Recurse
+        Copy-Item -Path (Join-Path $script:Root 'ui\*') -Destination (Join-Path $app 'ui')
+        Copy-Item -Path (Join-Path $script:Root 'ui-beta\*') -Destination (Join-Path $app 'ui-beta')
+        foreach ($f in 'server.ps1', 'cpmods.ps1', 'cpmods.cmd', 'frameworks.json', 'setup.ps1', 'bootstrap.ps1') { Copy-Item -LiteralPath (Join-Path $script:Root $f) -Destination $app }
+        Copy-Item -LiteralPath (Join-Path $script:Root 'share\Install.cmd'), (Join-Path $script:Root 'share\README.txt') -Destination $stage
+        if (-not $NoModList) { Write-JsonFile (Join-Path $stage 'modlist.json') (Export-ModList) }
+        if ($SettingsZip) { Copy-Item -LiteralPath $SettingsZip -Destination (Join-Path $stage 'mod-settings.zip') }
+        $zip = Join-Path $OutDir $(if ($NoModList) { 'cpmods-app.zip' } else { 'cpmods-share.zip' })
+        Compress-Archive -Path (Join-Path $stage '*') -DestinationPath $zip -Force
+        Write-Note "Share package created: $zip"
+        $zip
+    }
+    finally { Remove-Item -LiteralPath $stage -Recurse -Force -ErrorAction SilentlyContinue }
+}
+#endregion
+
+#region system integration
+#region browser foreground
+function Add-CpFgType {
+    if ('CpFg' -as [type]) { return }
+    Import-CpType 'CpFg' @'
+using System; using System.Text; using System.Diagnostics; using System.Collections.Generic; using System.Runtime.InteropServices;
+public static class CpFg {
+  delegate bool EnumProc(IntPtr h, IntPtr l);
+  [DllImport("user32.dll")] static extern bool EnumWindows(EnumProc cb, IntPtr l);
+  [DllImport("user32.dll")] static extern bool IsWindowVisible(IntPtr h);
+  [DllImport("user32.dll")] static extern int GetWindowTextLength(IntPtr h);
+  [DllImport("user32.dll", CharSet = CharSet.Unicode)] static extern int GetWindowText(IntPtr h, StringBuilder s, int n);
+  [DllImport("user32.dll")] static extern uint GetWindowThreadProcessId(IntPtr h, out uint pid);
+  [DllImport("user32.dll")] static extern IntPtr GetWindow(IntPtr h, uint cmd);
+  [DllImport("user32.dll")] static extern bool IsIconic(IntPtr h);
+  [DllImport("user32.dll")] static extern bool ShowWindow(IntPtr h, int cmd);
+  [DllImport("user32.dll")] static extern bool SetForegroundWindow(IntPtr h);
+  [DllImport("user32.dll")] static extern bool BringWindowToTop(IntPtr h);
+  [DllImport("user32.dll")] public static extern IntPtr GetForegroundWindow();
+  [DllImport("user32.dll")] static extern bool AttachThreadInput(uint a, uint b, bool attach);
+  [DllImport("kernel32.dll")] static extern uint GetCurrentThreadId();
+  [DllImport("user32.dll")] static extern void keybd_event(byte vk, byte scan, uint flags, UIntPtr extra);
+
+  // Topmost visible top-level window of the given process name, skipping one title (the cpmods window)
+  public static IntPtr FindTop(string exe, string skipTitle) {
+    var pids = new HashSet<uint>();
+    foreach (var p in Process.GetProcessesByName(exe)) pids.Add((uint)p.Id);
+    IntPtr found = IntPtr.Zero;
+    if (pids.Count == 0) return found;
+    EnumWindows((h, l) => {
+      if (!IsWindowVisible(h) || GetWindow(h, 4) != IntPtr.Zero) return true;
+      uint pid; GetWindowThreadProcessId(h, out pid);
+      if (!pids.Contains(pid)) return true;
+      int len = GetWindowTextLength(h);
+      if (len == 0) return true;
+      var sb = new StringBuilder(len + 1); GetWindowText(h, sb, sb.Capacity);
+      if (!string.IsNullOrEmpty(skipTitle) && sb.ToString().IndexOf(skipTitle, StringComparison.OrdinalIgnoreCase) >= 0) return true;
+      found = h; return false;
+    }, IntPtr.Zero);
+    return found;
+  }
+
+  // Foreground lock workaround: share input state with the current foreground thread, Alt tap as fallback
+  public static bool Focus(IntPtr h) {
+    if (h == IntPtr.Zero) return false;
+    if (IsIconic(h)) ShowWindow(h, 9);
+    uint dummy, me = GetCurrentThreadId();
+    uint fgThread = GetWindowThreadProcessId(GetForegroundWindow(), out dummy);
+    bool attached = fgThread != 0 && fgThread != me && AttachThreadInput(me, fgThread, true);
+    BringWindowToTop(h);
+    SetForegroundWindow(h);
+    if (attached) AttachThreadInput(me, fgThread, false);
+    if (GetForegroundWindow() != h) { keybd_event(0x12, 0, 0, UIntPtr.Zero); keybd_event(0x12, 0, 2, UIntPtr.Zero); SetForegroundWindow(h); }
+    return GetForegroundWindow() == h;
+  }
+}
+'@
+}
+
+function Get-DefaultBrowserExe {
+    $prog = (Get-ItemProperty 'HKCU:\Software\Microsoft\Windows\Shell\Associations\UrlAssociations\https\UserChoice' -ErrorAction SilentlyContinue).ProgId
+    $cmd = if ($prog) { "$((Get-ItemProperty "Registry::HKEY_CLASSES_ROOT\$prog\shell\open\command" -ErrorAction SilentlyContinue).'(default)')" } else { '' }
+    if ($cmd -match '^\s*"([^"]+)"' -or $cmd -match '^\s*(\S+)') { return [IO.Path]::GetFileNameWithoutExtension($Matches[1]) }
+    'msedge'
+}
+
+function Get-InstalledBrowsers {
+    $seen = @{}
+    foreach ($n in 'firefox', 'chrome', 'msedge', 'brave', 'opera', 'vivaldi', 'librewolf', 'waterfox') {
+        $p = (Get-ItemProperty "HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\App Paths\$n.exe" -ErrorAction SilentlyContinue).'(default)'
+        if (-not $p) { $p = (Get-ItemProperty "HKCU:\SOFTWARE\Microsoft\Windows\CurrentVersion\App Paths\$n.exe" -ErrorAction SilentlyContinue).'(default)' }
+        if ($p) { $p = $p.Trim('"') }
+        if ($p -and (Test-Path -LiteralPath $p) -and -not $seen[$p]) {
+            $seen[$p] = 1
+            $label = @{ firefox = 'Firefox'; chrome = 'Chrome'; msedge = 'Edge'; brave = 'Brave'; opera = 'Opera'; vivaldi = 'Vivaldi'; librewolf = 'LibreWolf'; waterfox = 'Waterfox' }[$n]
+            [ordered]@{ name = $label; path = $p }
+        }
+    }
+}
+
+# Brings the top window of a process to the front (programs started by the hidden server open behind others)
+function Show-AppWindow([string]$Exe, [int]$WaitMs = 4000) {
+    try {
+        Add-CpFgType
+        $sw = [Diagnostics.Stopwatch]::StartNew()
+        Start-Sleep -Milliseconds 300
+        do {
+            $h = [CpFg]::FindTop($Exe, 'Cyberpunk Mods')
+            if ($h -ne [IntPtr]::Zero -and [CpFg]::Focus($h)) { return $true }
+            Start-Sleep -Milliseconds 250
+        } while ($sw.ElapsedMilliseconds -lt $WaitMs)
+    }
+    catch { Write-Note "Could not bring $Exe to the front: $($_.Exception.Message)" }
+    $false
+}
+
+# Opens a link in the chosen (or Windows default) browser and brings that browser window to the front
+function Open-UrlInFront([string]$Url) {
+    $b = (Get-CpSettings).browser
+    if ($b -and (Test-Path -LiteralPath $b)) { Start-Process -FilePath $b -ArgumentList ('"{0}"' -f $Url); $exe = [IO.Path]::GetFileNameWithoutExtension($b) }
+    else { Start-Process $Url; $exe = Get-DefaultBrowserExe }
+    Show-AppWindow $exe 6000
+}
+
+# Default folder app (File Pilot, Directory Opus...) from Directory\shell; empty when folders open in Explorer
+function Get-FolderAppCommand {
+    foreach ($root in 'HKCU:\Software\Classes\Directory\shell', 'Registry::HKEY_CLASSES_ROOT\Directory\shell') {
+        $verb = "$((Get-ItemProperty -LiteralPath $root -ErrorAction SilentlyContinue).'(default)')"
+        if (-not $verb -or $verb -eq 'none') { $verb = 'open' }
+        $cmd = "$((Get-ItemProperty -LiteralPath "$root\$verb\command" -ErrorAction SilentlyContinue).'(default)')"
+        if ($cmd) { return $(if ($cmd -match '(?i)(^|[\\"\s])explorer(\.exe)?("|\s|$)') { '' } else { $cmd }) }
+    }
+    ''
+}
+
+# Opens a folder with the default folder app; only Explorer can also highlight a file in it
+function Open-Folder([string]$Path, [string]$SelectFile) {
+    $app = Get-FolderAppCommand
+    if (-not $app) {
+        if ($SelectFile) { Start-Process explorer.exe -ArgumentList ('/select,"{0}"' -f $SelectFile) }
+        else { Start-Process explorer.exe -ArgumentList ('"{0}"' -f $Path) }
+        return
+    }
+    $psi = [Diagnostics.ProcessStartInfo]::new($Path)
+    $psi.UseShellExecute = $true
+    [void][Diagnostics.Process]::Start($psi)
+    if ($app -match '^\s*"([^"]+)"' -or $app -match '^\s*(\S+)') { [void](Show-AppWindow ([IO.Path]::GetFileNameWithoutExtension($Matches[1]))) }
+}
+#endregion
+
+# Programs started by the game (e.g. a folder opened by its crash reporter) carry the Steam overlay and keep the game "Running"
+function Get-SteamGameBlockers {
+    $skip = 'Cyberpunk2077', 'REDEngineErrorReporter', 'REDprelauncher', 'steam', 'steamwebhelper', 'GameOverlayUI', 'GameOverlayUI64'
+    Get-Process | Where-Object { $skip -notcontains $_.ProcessName } | ForEach-Object {
+        $p = $_
+        try { if ($p.Modules | Where-Object { $_.ModuleName -like 'gameoverlayrenderer*' }) { $p } } catch { }
+    }
+}
+
+# Clears a stale "Running" state: names blocking programs instead of restarting Steam when one exists
+function Repair-SteamRunningFlag {
+    $running = (Get-ItemProperty 'HKCU:\Software\Valve\Steam' -ErrorAction SilentlyContinue).RunningAppID
+    if ("$running" -ne '1091500') { return [ordered]@{ restarted = $false; blockers = @() } }
+    if (Get-Process -Name Cyberpunk2077, REDEngineErrorReporter, REDprelauncher -ErrorAction SilentlyContinue) { return [ordered]@{ restarted = $false; blockers = @() } }
+    $block = @(Get-SteamGameBlockers | ForEach-Object { "$($_.ProcessName) (pid $($_.Id))" })
+    if ($block) { return [ordered]@{ restarted = $false; blockers = $block } }
+    $steam = Join-Path (Get-ItemProperty 'HKCU:\Software\Valve\Steam').SteamPath 'steam.exe'
+    & $steam -shutdown
+    for ($i = 0; $i -lt 60 -and (Get-Process steam -ErrorAction SilentlyContinue); $i++) { Start-Sleep -Milliseconds 500 }
+    if (Get-Process steam -ErrorAction SilentlyContinue) { Stop-Process -Name steam -Force -ErrorAction SilentlyContinue; Start-Sleep -Seconds 2 }
+    Start-Process explorer.exe -ArgumentList 'steam://open/main'
+    for ($i = 0; $i -lt 60 -and -not (Get-Process steam -ErrorAction SilentlyContinue); $i++) { Start-Sleep -Milliseconds 500 }
+    Start-Sleep -Seconds 6
+    [ordered]@{ restarted = $true; blockers = @() }
+}
+
+function Get-PwshPath {
+    $p = Join-Path $env:LOCALAPPDATA 'Microsoft\WindowsApps\pwsh.exe'
+    if (Test-Path -LiteralPath $p) { return $p }
+    $c = Get-Command pwsh -ErrorAction SilentlyContinue
+    if ($c) { return $c.Source }
+    $p = Join-Path $env:ProgramFiles 'PowerShell\7\pwsh.exe'
+    if (Test-Path -LiteralPath $p) { return $p }
+    (Get-Process -Id $PID).Path
+}
+
+function Register-NxmHandler {
+    $cmd = '"{0}" -NoProfile -WindowStyle Hidden -ExecutionPolicy Bypass -File "{1}" nxm "%1"' -f (Get-PwshPath), (Join-Path $script:Root 'cpmods.ps1')
+    $base = 'HKCU:\Software\Classes\nxm'
+    [void](New-Item -Path "$base\shell\open\command" -Force)
+    Set-ItemProperty -Path $base -Name '(default)' -Value 'URL:NXM Protocol'
+    Set-ItemProperty -Path $base -Name 'URL Protocol' -Value ''
+    Set-ItemProperty -Path "$base\shell\open\command" -Name '(default)' -Value $cmd
+}
+
+function Test-NxmHandler { "$((Get-ItemProperty 'HKCU:\Software\Classes\nxm\shell\open\command' -ErrorAction SilentlyContinue).'(default)')" -match 'cpmods' }
+
+function Get-ServerInfo { if (Test-Path -LiteralPath $script:ServerFile) { try { Read-JsonFile $script:ServerFile } catch { $null } } }
+function Write-ServerInfo([int]$Port, [string]$Token) { Write-JsonFile $script:ServerFile ([ordered]@{ port = $Port; token = $Token; pid = $PID; started = (Get-Date).ToString('s') }) }
+function Remove-ServerInfo { $i = Get-ServerInfo; if ($i -and [int]$i.pid -eq $PID) { Remove-Item -LiteralPath $script:ServerFile -Force -ErrorAction SilentlyContinue } }
+
+function Start-CpServer([switch]$Open) {
+    $a = @('-NoProfile', '-WindowStyle', 'Hidden', '-ExecutionPolicy', 'Bypass', '-File', ('"{0}"' -f (Join-Path $script:Root 'server.ps1')))
+    if ($Open) { $a += '-Open' }
+    Start-Process -FilePath (Get-PwshPath) -ArgumentList $a -WindowStyle Hidden
+}
+
+# App window: the server shows its built-in WebView2 window (lib\cpwindow.ps1, no browser needed).
+# With a token, ask the running server; -Browser (or no answer) opens the "Open links in" browser instead.
+function Open-CpWindow([int]$Port = 7077, [string]$Token, [switch]$Browser) {
+    if (-not $Browser -and $Token) {
+        try { [void](Invoke-RestMethod -Method Post "http://localhost:$Port/api/window" -Headers @{ 'X-Cp-Token' = $Token } -TimeoutSec 5); return } catch { }
+    }
+    $url = "http://localhost:$Port/"
+    $s = try { Get-CpSettings } catch { @{} }
+    if ($s.uiChannel -eq 'beta') { $url += 'beta/' }
+    $b = "$($s.browser)"
+    if (-not $b -or -not (Test-Path -LiteralPath $b)) { Start-Process $url; return }
+    $n = [IO.Path]::GetFileNameWithoutExtension($b).ToLower()
+    # Chromium browsers can show an app window from the user's own profile; Firefox-family gets a new window
+    $a = if ($n -in 'chrome', 'msedge', 'brave', 'vivaldi', 'opera', 'chromium', 'thorium') { @("--app=$url", '--window-size=1440,920') }
+    elseif ($n -in 'firefox', 'librewolf', 'waterfox', 'floorp', 'zen') { @('-new-window', $url) }
+    else { @($url) }
+    Start-Process -FilePath $b -ArgumentList $a
+}
+
+function New-CpShortcuts {
+    $ws = New-Object -ComObject WScript.Shell
+    $icon = Join-Path $script:Game 'bin\x64\Cyberpunk2077.exe'
+    foreach ($dir in [Environment]::GetFolderPath('Desktop'), [Environment]::GetFolderPath('Programs')) {
+        $path = Join-Path $dir 'Cyberpunk Mods.lnk'
+        $lnk = $ws.CreateShortcut($path)
+        $lnk.TargetPath = Get-PwshPath
+        $lnk.Arguments = '-NoProfile -WindowStyle Hidden -ExecutionPolicy Bypass -File "{0}" -Open' -f (Join-Path $script:Root 'server.ps1')
+        $lnk.WorkingDirectory = $script:Root
+        $lnk.IconLocation = "$icon,0"
+        $lnk.Description = 'Cyberpunk 2077 mod manager (cpmods)'
+        $lnk.WindowStyle = 7
+        $lnk.Save()
+        $path
+    }
+}
+#endregion
+
+Export-ModuleMember -Function *

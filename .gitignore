@@ -1,0 +1,16 @@
+# Allowlist: only the app's own files are published.
+# Never: state (Nexus key, mod list), backups, downloads, save copies, settings backups, logs, config with game path.
+/*
+!/.gitignore
+!/README.md
+!/lib/
+!/ui/
+!/ui-beta/
+!/share/
+!/tests/
+!/server.ps1
+!/cpmods.ps1
+!/cpmods.cmd
+!/setup.ps1
+!/bootstrap.ps1
+!/frameworks.json

@@ -1,0 +1,10 @@
+[
+  { "name": "RED4ext", "nexusId": 2380, "repo": "wopss/RED4ext", "asset": "^red4ext-[\\d.]+\\.zip$" },
+  { "name": "Cyber Engine Tweaks", "nexusId": 107, "repo": "yamashi/CyberEngineTweaks", "asset": "^cet_[\\d_]+\\.zip$" },
+  { "name": "redscript", "nexusId": 1511, "repo": "jac3km4/redscript", "tag": "v0.5.32", "asset": "^redscript-v[\\d.]+-windows\\.zip$" },
+  { "name": "ArchiveXL", "nexusId": 4198, "repo": "psiberx/cp2077-archive-xl", "asset": "^ArchiveXL-[\\d.]+\\.zip$" },
+  { "name": "TweakXL", "nexusId": 4197, "repo": "psiberx/cp2077-tweak-xl", "asset": "^TweakXL-[\\d.]+\\.zip$" },
+  { "name": "Codeware", "nexusId": 7780, "repo": "psiberx/cp2077-codeware", "asset": "^Codeware-[\\d.]+\\.zip$" },
+  { "name": "Mod Settings", "nexusId": 4885, "repo": "jackhumbert/mod_settings", "asset": "^mod_settings_v[\\d.]+\\.zip$" },
+  { "name": "Input Loader", "nexusId": 4575, "repo": "jackhumbert/cyberpunk2077-input-loader", "asset": "^input_loader_v[\\d.]+\\.zip$" }
+]
