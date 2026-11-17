@@ -68,6 +68,29 @@ public static class CpFrame {
     return DefSubclassProc(h, m, w, l);
   }
 }
+// Own taskbar identity: the button shows this window's icon instead of the host's (Store PowerShell),
+// and pinning it relaunches cpmods. Null values clear the properties, as Windows asks before a window closes.
+public static class CpAppId {
+  [ComImport, Guid("886D8EEB-8CF2-4446-8D02-CDBA1DBDCF99"), InterfaceType(ComInterfaceType.InterfaceIsIUnknown)]
+  interface IPropertyStore { void GetCount(out uint c); void GetAt(uint i, out PK k); void GetValue(ref PK k, out PV v); void SetValue(ref PK k, ref PV v); void Commit(); }
+  [StructLayout(LayoutKind.Sequential, Pack = 4)] struct PK { public Guid f; public uint p; }
+  [StructLayout(LayoutKind.Sequential)] struct PV { public ushort vt; ushort a, b, c; public IntPtr p; IntPtr q; }
+  [DllImport("shell32.dll")] static extern int SHGetPropertyStoreForWindow(IntPtr h, ref Guid iid, [MarshalAs(UnmanagedType.Interface)] out IPropertyStore s);
+  static void Set(IPropertyStore s, uint pid, string v) {
+    var k = new PK { f = new Guid("9F4C2855-9F79-4B39-A8D0-E1D42DE1D5F3"), p = pid };
+    bool none = string.IsNullOrEmpty(v);
+    var pv = new PV { vt = (ushort)(none ? 0 : 31), p = none ? IntPtr.Zero : Marshal.StringToCoTaskMemUni(v) };
+    try { s.SetValue(ref k, ref pv); } finally { if (pv.p != IntPtr.Zero) Marshal.FreeCoTaskMem(pv.p); }
+  }
+  // System.AppUserModel: 2 RelaunchCommand, 3 RelaunchIconResource, 4 RelaunchDisplayNameResource, 5 ID; empty = not set
+  // (3 and 4 only count when 2 is set)
+  public static void Apply(IntPtr h, string id, string cmd, string icon, string name) {
+    Guid iid = typeof(IPropertyStore).GUID; IPropertyStore s;
+    if (SHGetPropertyStoreForWindow(h, ref iid, out s) != 0) return;
+    try { Set(s, 2, cmd); Set(s, 3, icon); Set(s, 4, name); Set(s, 5, id); s.Commit(); }
+    finally { Marshal.ReleaseComObject(s); }
+  }
+}
 '@
 try {
     $binDir = Join-Path $Root 'state\bin'
@@ -208,6 +231,7 @@ function Show-CpWindow {
         })
     $form.add_FormClosing({
             $f = $global:CpW.form; $sc = $f.DeviceDpi / 96.0
+            if ($global:CpFrameOk) { try { [CpAppId]::Apply($f.Handle, '', '', '', '') } catch { } }
             $b = if ($f.WindowState -eq 'Normal') { $f.Bounds } else { $f.RestoreBounds }
             try { [IO.File]::WriteAllText($global:CpShared.winFile, (@{ w = [int]($b.Width / $sc); h = [int]($b.Height / $sc); max = ($f.WindowState -eq 'Maximized') } | ConvertTo-Json -Compress)) } catch { }
         })
@@ -244,6 +268,9 @@ function Show-CpWindow {
     $form.add_Activated({ Send-CpWinState $true })
     $form.add_Deactivate({ Send-CpWinState $false })
     $S.winHwnd = [long]$form.Handle
+    if ($global:CpFrameOk -and $S.winAppId) {
+        try { [CpAppId]::Apply($form.Handle, $S.winAppId, $S.winRelaunch, "$IconPath,0", 'Cyberpunk Mods') } catch { }
+    }
     Set-CpFrame $true
     $S.winOpen = $true
     try { [Windows.Forms.Application]::Run($form) }

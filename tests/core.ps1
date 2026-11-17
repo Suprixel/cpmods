@@ -183,6 +183,11 @@ try {
     Remove-Item (Join-Path (Get-CpPaths).root "backup\ModB\$cfgRel") -Force
     Remove-InstalledMod 'ModB'
     Check ((& $cont $cfgRel) -eq 'B') 'T15 the file stays (the copy of B) instead of being deleted'
+
+    Write-Host '--- T16: the window C# (title bar, taskbar ID) compiles; a typo would silently drop both'
+    $ast = [Management.Automation.Language.Parser]::ParseFile((Join-Path (Split-Path $PSScriptRoot) 'lib\cpwindow.ps1'), [ref]$null, [ref]$null)
+    Add-Type -TypeDefinition $ast.Find({ param($n) $n -is [Management.Automation.Language.AssignmentStatementAst] -and "$($n.Left)" -eq '$frameSrc' }, $true).Right.Expression.Value
+    Check (('CpFrame' -as [type]) -and ('CpAppId' -as [type])) 'T16 CpFrame and CpAppId compile'
 }
 catch { $script:fails++; Write-Host "FAIL (stopped): $($_.Exception.Message)" -ForegroundColor Red }
 finally {

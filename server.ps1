@@ -85,6 +85,9 @@ $shared.winUrl = "http://localhost:$Port/" + $(if ((Get-CpSettings).uiChannel -e
 $shared.winFile = Join-Path (Get-CpPaths).state 'window.json'
 $shared.uiFile = Join-Path (Get-CpPaths).state 'ui.json'
 $shared.winTitle = if ($Dev) { 'Cyberpunk Mods (dev)' } else { 'Cyberpunk Mods' }
+# taskbar: own button with the window's icon (not PowerShell's); pinning it starts cpmods like the shortcut
+$shared.winAppId = if ($Dev) { 'cpmods.CyberpunkMods.Dev' } else { 'cpmods.CyberpunkMods' }
+$shared.winRelaunch = if ($Dev) { $null } else { '"{0}" -NoProfile -WindowStyle Hidden -ExecutionPolicy Bypass -File "{1}" -Open' -f (Get-PwshPath), (Join-Path $Root 'server.ps1') }
 $shared.winOpen = $false; $shared.winShow = $false; $shared.lean = $false
 
 if ($Dev) { Write-JsonFile $infoFile ([ordered]@{ port = $Port; token = $token; pid = $PID; started = (Get-Date).ToString('s') }) }
