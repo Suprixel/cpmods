@@ -208,6 +208,42 @@ try {
     $r = Enable-InstalledMod 'ModP' -Ask
     Check ($r.conflict -and (& $cont $shared) -eq 'Q' -and ((Get-State).disabled | Where-Object name -eq 'ModP')) 'T18 asks and changes nothing'
     Check ($null -eq (Enable-InstalledMod 'ModP') -and (& $cont $shared) -eq 'P') 'T18 without -Ask it turns on as before (troubleshooting, restore points)'
+
+    Write-Host '--- T19: a CET mod log: lines of an earlier session stay out, the real error shows (not "stack traceback:")'
+    $cetDir = "$g\bin\x64\plugins\cyber_engine_tweaks"
+    New-Item -ItemType Directory -Force "$cetDir\mods\ModX" | Out-Null
+    $now = Get-Date; $ts = { param($d) $d.ToString('yyyy-MM-dd HH:mm:ss') }
+    "[$(& $ts $now)] CET version v1.0.0" | Set-Content "$cetDir\cyber_engine_tweaks.log"
+    @("[$(& $ts $now.AddDays(-1))] [1] init.lua:5: attempt to index a nil value", 'stack traceback:', "`tinit.lua:5: in function <init.lua:1>",
+        "[$(& $ts $now)] [1] init.lua:87: attempt to index field 'x' (a nil value)", 'stack traceback:', "`tinit.lua:87: in function <init.lua:78>") | Set-Content "$cetDir\mods\ModX\ModX.log"
+    $ce = @((Read-CetSession $now.AddMinutes(-1) $now.AddMinutes(5)).errors)
+    Check ($ce.Count -eq 1 -and $ce[0].text -eq "init.lua:87: attempt to index field 'x' (a nil value)" -and $ce[0].log -like '*mods\ModX\ModX.log') "T19 only this session's error: $(($ce | ForEach-Object { $_.text }) -join ' | ')"
+
+    Write-Host '--- T20: problem links: the mod a named file comes from, and mods replacing the same script function'
+    $rf = "@replaceMethod(FooController)`nprotected cb func OnBar() -> Bool {`n  return true;`n}"
+    Install-ModArchive (New-TestMod 'ModR1' @{ 'r6\scripts\R1\a.reds' = $rf }) (& $meta 'ModR1') | Out-Null
+    Install-ModArchive (New-TestMod 'ModR2' @{ 'r6\scripts\R2\b.reds' = $rf; 'r6\scripts\R2\c.reds' = "@replaceMethod(FooController)`nfunc OnOther() {}" }) (& $meta 'ModR2') | Out-Null
+    $maps = Get-OwnerMaps (Get-State)
+    $rv = @(Get-ReplaceRivals 'r6\scripts\R2\b.reds' 1 'ModR2' $maps @{})
+    Check ($rv.Count -eq 1 -and $rv[0].mod -eq 'ModR1' -and $rv[0].why -like '*FooController.OnBar*') "T20 the other replacement of FooController.OnBar: $(($rv | ForEach-Object { $_.mod }) -join ', ')"
+    $fl = @(Get-FileLinks "input_loader: 'r6/scripts/R1/a.reds' is not a known file" 'Input Loader' $maps)
+    Check ($fl.Count -eq 1 -and $fl[0].mod -eq 'ModR1') 'T20 a file named in a message points to its mod'
+
+    Write-Host '--- T21: freeing disk space deletes only downloads no mod or restore point uses (and old leftovers)'
+    $dl = (Get-CpPaths).downloads; $old = (Get-Date).AddHours(-2)
+    $zPt = New-TestMod 'PtMod' @{ 'archive\pc\mod\pt.archive' = 'pt' }
+    Copy-Item $zPt "$dl\pt.zip"; Copy-Item $zPt "$dl\pt2.zip"; Copy-Item $zPt "$dl\spare.zip"; Copy-Item $zPt "$dl\fresh.zip"
+    Install-ModArchive "$dl\pt.zip" (& $meta 'PtMod') | Out-Null
+    [void](Save-RestorePoint 'manual' 'T21')
+    Install-ModArchive "$dl\pt2.zip" ([ordered]@{ name = 'PtMod'; version = '2'; source = 'manual' }) | Out-Null
+    foreach ($f in 'pt.zip', 'spare.zip') { (Get-Item "$dl\$f").LastWriteTime = $old }
+    New-Item -ItemType Directory -Force "$Sb\tmp\stale", "$Sb\tmp\recent" | Out-Null; 'x' | Set-Content "$Sb\tmp\stale\f.txt"; (Get-Item "$Sb\tmp\stale").LastWriteTime = $old
+    Check ((@(Get-SpareDownloads | ForEach-Object file) -join ',') -eq 'spare.zip' -and (@(Get-SpareDownloads -Old | ForEach-Object file | Sort-Object) -join ',') -eq 'pt.zip,spare.zip') 'T21 spare: unused and old; -Old adds the version only a restore point uses'
+    $si = Get-StorageInfo
+    Check ($si.mods.count -eq @((Get-State).mods).Count -and $si.spare.free.Count -eq 1 -and $si.spare.old.Count -eq 1 -and $si.data.downloads.files -ge 4) 'T21 storage summary'
+    [void](Invoke-StorageCleanup $false)
+    Check (-not (Test-Path "$dl\spare.zip") -and (Test-Path "$dl\pt.zip") -and (Test-Path "$dl\pt2.zip") -and (Test-Path "$dl\fresh.zip")) 'T21 only the unused old download is deleted'
+    Check (-not (Test-Path "$Sb\tmp\stale") -and (Test-Path "$Sb\tmp\recent")) 'T21 old leftovers in tmp go, recent ones stay'
 }
 catch { $script:fails++; Write-Host "FAIL (stopped): $($_.Exception.Message)" -ForegroundColor Red }
 finally {

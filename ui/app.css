@@ -853,3 +853,74 @@ input.hex-in { width: 100px; font: 13px "Cascadia Mono", Consolas, monospace; }
   .sx-body { padding-left: 16px; }
   .bk-bar { flex-wrap: wrap; }
 }
+
+/* reports: what each problem card can do, and the other mods it involves */
+.callout > div { flex: 1; min-width: 0; }
+.issue-link { display: flex; flex-wrap: wrap; align-items: center; gap: 4px 8px; margin-top: 8px; color: var(--text2); font-size: 12.5px; }
+.issue-acts .link-btn { color: var(--text3); }
+.issue-acts .link-btn:hover { color: var(--text); }
+
+/* game page: status and play, then launch options, saves and backups, folders */
+.gm { display: flex; flex-direction: column; gap: 16px; max-width: 1240px; }
+.gm-top { display: flex; flex-wrap: wrap; align-items: center; gap: 14px 16px; padding: 16px; }
+.gm-ic { display: grid; place-items: center; width: 46px; height: 46px; flex: none; border-radius: 13px; background: var(--raised); color: var(--text2); }
+.gm-ic svg { width: 26px; height: 26px; }
+.gm-ic.ok { color: var(--ok); } .gm-ic.warn { color: var(--warn); } .gm-ic.bad { color: var(--bad); } .gm-ic.run { color: var(--info); }
+.gm-txt { display: flex; flex: 1 1 260px; flex-direction: column; gap: 2px; min-width: 0; }
+.gm-txt b { font-size: 16px; font-weight: 650; }
+.gm-txt > span:not(.mono-path) { display: flex; align-items: center; gap: 7px; color: var(--text2); font-size: 12.5px; }
+.gm-acts { display: flex; flex-wrap: wrap; gap: 8px; }
+.gm-foot { padding: 8px 10px; border-top: 1px solid var(--line); }
+.gm-last { display: inline-flex; align-items: center; gap: 8px; max-width: 100%; padding: 4px 8px; border: 0; border-radius: 7px; background: none; color: var(--text2); font-size: 12.5px; cursor: pointer; }
+.gm-last:hover { background: var(--hover); color: var(--text); }
+.gm-last svg { width: 15px; height: 15px; }
+.gm-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(380px, 1fr)); gap: 16px; align-items: start; }
+.gm .card-head h3 svg { width: 17px; height: 17px; color: var(--text3); }
+
+/* settings: pointer to the Game page, disk space */
+.sx-note { display: flex; align-items: center; gap: 10px; padding: 10px 14px; border: 1px dashed var(--line2); border-radius: var(--r-sm); color: var(--text2); font-size: 13px; }
+.sx-note svg { color: var(--text3); }
+.du { display: flex; flex-direction: column; gap: 8px; }
+.du-head { display: flex; flex-wrap: wrap; align-items: baseline; gap: 4px 10px; }
+.du-head b { color: var(--text); }
+.du-list { display: flex; flex-direction: column; gap: 5px; padding: 8px 12px; border: 1px solid var(--line); border-radius: var(--r-sm); background: var(--bg); }
+.du-row { display: grid; grid-template-columns: minmax(130px, 200px) 1fr 78px; align-items: center; gap: 12px; font-size: 12.5px; color: var(--text2); }
+.du-bar { height: 6px; border-radius: 3px; background: var(--line); overflow: hidden; }
+.du-bar i { display: block; height: 100%; border-radius: 3px; background: var(--accent-bar); }
+.du-n { text-align: right; color: var(--text); font-variant-numeric: tabular-nums; }
+.du-drives { margin: 0; }
+.du-clean { display: flex; flex-wrap: wrap; align-items: center; gap: 8px 12px; color: var(--text2); font-size: 12.5px; }
+.du-clean > span:first-child { flex: 1 1 280px; }
+
+/* appearance: background picker (dark range) and swatch lines readable on the white card */
+.theme-sw i { background: var(--sw-ln, rgba(255, 255, 255, .2)); }
+.theme-sw i + i { background: var(--sw-ln, rgba(255, 255, 255, .14)); opacity: .7; }
+.bgpick .light-range { background: linear-gradient(90deg, hsl(var(--wh) var(--ws) 0%), hsl(var(--wh) var(--ws) 18%)); box-shadow: 0 0 0 1px var(--line2); }
+
+/* White background: light versions of the colors that are tuned for dark */
+[data-bg="white"] { color-scheme: light; }
+[data-bg="white"] .li:hover, [data-bg="white"] .sx-head:hover { background: rgba(16, 24, 40, .035); }
+[data-bg="white"] .tb-wb:hover { background: rgba(16, 24, 40, .07); }
+[data-bg="white"] .tb-wb:active { background: rgba(16, 24, 40, .05); }
+[data-bg="white"] .pill.ok { color: #0f6a42; border-color: #a9dcc3; background: #e9f7f0; }
+[data-bg="white"] .pill.warn { color: #8a5200; border-color: #ecd09b; background: #fdf4e3; }
+[data-bg="white"] .pill.bad { color: #b02a23; border-color: #f0b9b5; background: #fdeceb; }
+[data-bg="white"] .pill.info { color: #0a6588; border-color: #a9d8e8; background: #e8f6fb; }
+[data-bg="white"] .pill.muted { color: #4b5563; border-color: #d3d9e1; background: #f3f5f8; }
+[data-bg="white"] .err { border-color: #f0b9b5; background: #fdeceb; color: #a1261f; }
+[data-bg="white"] .btn.danger, [data-bg="white"] .btn.kill { border-color: #ecaaa5; background: #fdeceb; color: #b02a23; }
+[data-bg="white"] .btn.danger:hover, [data-bg="white"] .btn.kill:hover { border-color: #e39690; background: #fadad7; }
+[data-bg="white"] .menu-item.danger, [data-bg="white"] .stag.s-failed, [data-bg="white"] .stag.s-bad, [data-bg="white"] .tabbar-btn .n.hot { color: #b02a23; }
+[data-bg="white"] .tab .n.hot, [data-bg="white"] .sect .n.hot { color: #fff; }
+[data-bg="white"] .bb { color: #2b323c; }
+[data-bg="white"] .banner { background: #fdf4dc; color: #6b4e00; }
+[data-bg="white"] .banner.bad { background: #fdeceb; color: #9a231d; }
+[data-bg="white"] .banner.info { background: #e6f5fa; color: #0b5874; }
+[data-bg="white"] .switch span::after { background: #fff; box-shadow: 0 1px 2px rgba(16, 24, 40, .3); }
+[data-bg="white"] .theme-sw { border-color: var(--line2); }
+[data-bg="white"] .tile:hover { box-shadow: 0 10px 28px rgba(16, 24, 40, .12); }
+[data-bg="white"] .menu, [data-bg="white"] .modal-card, [data-bg="white"] .toast { box-shadow: 0 16px 40px rgba(16, 24, 40, .16); }
+[data-bg="white"] .pane.overlay { box-shadow: -24px 0 60px rgba(16, 24, 40, .18); }
+/* kind colors darker on white so chips and icons stay readable */
+[data-bg="white"] .k-assets { --kc: #0a7ea0; } [data-bg="white"] .k-xl { --kc: #5b48d6; } [data-bg="white"] .k-script { --kc: #8a7600; } [data-bg="white"] .k-cet { --kc: #13804f; } [data-bg="white"] .k-plugin { --kc: #c2461f; }
+[data-bg="white"] .k-tweak { --kc: #b02f86; } [data-bg="white"] .k-input { --kc: #2f62c7; } [data-bg="white"] .k-config { --kc: #56606c; } [data-bg="white"] .k-fw { --kc: #8a6d12; } [data-bg="white"] .k-docs { --kc: #6b7480; }

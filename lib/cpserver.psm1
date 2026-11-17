@@ -102,6 +102,10 @@ switch ("$($P.op)") {
     default { throw "Unknown troubleshooting step $($P.op)" }
 }
 '@
+    cleanup     = @'
+param($Job, $P, $Shared)
+Use-Lock { Invoke-StorageCleanup ([bool]$P.old) }
+'@
 }
 
 function Send-Bytes($Ctx, [byte[]]$Bytes, [string]$Type, [int]$Code = 200) {
@@ -410,6 +414,12 @@ function Invoke-CpRequest {
             'POST /api/prefs' { Save-UiPrefs $raw; Send-Json $Ctx @{ ok = $true } }
             'POST /api/window' { Request-CpWindow $Shared; Send-Json $Ctx @{ ok = $true } }
             'GET /api/perf' { Send-Json $Ctx (Get-CpPerf $Shared) }
+            'GET /api/storage' { Send-Json $Ctx (Get-StorageInfo) }
+            'POST /api/storage' {
+                if ("$($b.op)" -ne 'clean') { throw "Unknown op $($b.op)" }
+                $j = Start-CpJob $Shared 'cleanup' 'Freeing disk space' @{ old = [bool]$b.old }
+                Send-Json $Ctx @{ ok = $true; job = $j.id }
+            }
             'POST /api/free' { $Shared.winFree = $true; $Shared.trimNow = $true; Send-Json $Ctx @{ ok = $true } }
             'POST /api/key' {
                 $v = Set-NexusKey "$($b.key)"
@@ -582,6 +592,15 @@ function Invoke-CpRequest {
                             if (-not $t) { throw 'Not found' }
                             Open-Folder $t
                         }
+                    }
+                    'openFile' {
+                        # a log of the game folder in its usual app (Notepad for .log); text logs only
+                        $rel = "$($b.path)" -replace '/', '\'
+                        if (-not $rel -or [IO.Path]::IsPathRooted($rel) -or $rel -match '(^|\\)\.\.(\\|$)' -or [IO.Path]::GetExtension($rel) -notin '.log', '.txt') { throw 'Invalid path' }
+                        $t = Join-Path (Get-CpPaths).game $rel
+                        if (-not (Test-Path -LiteralPath $t -PathType Leaf)) { throw "That log is gone (the game writes a new one at each launch): $rel" }
+                        $pr = Start-Process -FilePath $t -PassThru
+                        if ($pr) { [void](Show-AppWindow $pr.ProcessName) }
                     }
                     'kill' { $r = Stop-GameProcesses; Send-Json $Ctx @{ ok = $true; stopped = @($r.stopped); left = @($r.left) }; return }
                     'steam' {

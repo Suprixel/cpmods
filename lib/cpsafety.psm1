@@ -1,4 +1,4 @@
-# cpmods safety nets: restore points, save backups, mod settings backups, launch without mods, key bindings map
+# cpmods safety nets: restore points, save backups, mod settings backups, launch without mods, key bindings map, disk space
 # Uses functions exported by cpmods.psm1 and cpinsight.psm1 (import those first). Data lives in cpmods\safety.
 $ErrorActionPreference = 'Stop'
 
@@ -587,6 +587,64 @@ function Get-KeyMap([string]$UserSettings) {
         keys = $keys; userSettings = (Test-Path -LiteralPath $UserSettings)
         counts = [ordered]@{ clash = @($keys | Where-Object { $_.state -eq 'clash' }).Count; shared = @($keys | Where-Object { $_.state -eq 'shared' }).Count; mod = @($keys | Where-Object { $_.state -in 'mod', 'shared', 'clash' }).Count; game = $game.Count }
     }
+}
+#endregion
+
+#region disk space: what mods and cpmods' own data take, and a cleanup that never deletes what a mod or restore point uses
+function Get-DirUse([string]$Path) {
+    $b = 0L; $n = 0
+    if ([IO.Directory]::Exists($Path)) {
+        $o = [IO.EnumerationOptions]::new(); $o.RecurseSubdirectories = $true; $o.AttributesToSkip = 0
+        foreach ($f in [IO.DirectoryInfo]::new($Path).EnumerateFiles('*', $o)) { $b += $f.Length; $n++ }
+    }
+    [ordered]@{ bytes = $b; files = $n }
+}
+# downloads a cleanup may delete: used by no mod (installed, off or waiting), not 30 minutes old (an install may be about
+# to start), and with -Old also the ones only restore points still use (those points can then not bring that version back)
+function Get-SpareDownloads([switch]$Old) {
+    $pts = [Collections.Generic.HashSet[string]]::new([StringComparer]::OrdinalIgnoreCase)
+    foreach ($p in Get-RestorePoints) { foreach ($m in @($p.mods)) { if ($m.archive) { [void]$pts.Add([IO.Path]::GetFileName("$($m.archive)")) } } }
+    $cut = (Get-Date).AddMinutes(-30)
+    foreach ($d in @(Get-DownloadsInfo)) {
+        if ($d.status -ne 'unused' -or [datetime]$d.date -gt $cut) { continue }
+        $d.points = $pts.Contains($d.file)
+        if ($Old -or -not $d.points) { $d }
+    }
+}
+function Get-StorageInfo {
+    $p = Get-CpPaths; $s = Get-State
+    $mods = @(foreach ($m in $s.mods) { $b = 0L; foreach ($f in @($m.files)) { $fi = [IO.FileInfo]::new((Join-Path $p.game $f)); if ($fi.Exists) { $b += $fi.Length } }; [ordered]@{ name = $m.name; bytes = $b } })
+    $spare = @(Get-SpareDownloads -Old)
+    $sum = { param($l, $k = 'size') $t = 0L; foreach ($x in @($l)) { $t += [long]$x[$k] }; $t }
+    $data = [ordered]@{
+        downloads = Get-DirUse $p.downloads; backup = Get-DirUse (Join-Path $p.root 'backup'); saves = Get-DirUse (Get-SavesBackupDir)
+        settings = Get-DirUse (Get-SettingsBackupDir); parked = Get-DirUse (Join-Path $p.root 'parked'); tmp = Get-DirUse (Join-Path $p.root 'tmp'); app = Get-DirUse $p.state
+    }
+    $log = [IO.FileInfo]::new($p.log); if ($log.Exists) { $data.app.bytes += $log.Length }
+    $drives = foreach ($d in @([IO.Path]::GetPathRoot($p.game), [IO.Path]::GetPathRoot($p.root)) | Select-Object -Unique) {
+        try { $i = [IO.DriveInfo]::new($d); [ordered]@{ name = $i.Name.TrimEnd('\'); free = $i.AvailableFreeSpace; total = $i.TotalSize; game = $d -eq [IO.Path]::GetPathRoot($p.game); cpmods = $d -eq [IO.Path]::GetPathRoot($p.root) } } catch { }
+    }
+    [ordered]@{
+        mods = [ordered]@{ bytes = & $sum $mods 'bytes'; count = $mods.Count; top = @($mods | Sort-Object { $_.bytes } -Descending | Select-Object -First 5) }
+        data = $data; drives = @($drives); saveCopies = @(Get-SaveBackups).Count
+        spare = [ordered]@{ free = @($spare | Where-Object { -not $_.points } | ForEach-Object { [ordered]@{ file = $_.file; size = $_.size } }); old = @($spare | Where-Object { $_.points } | ForEach-Object { [ordered]@{ file = $_.file; size = $_.size } })
+            freeBytes = & $sum @($spare | Where-Object { -not $_.points }); oldBytes = & $sum @($spare | Where-Object { $_.points }) }
+    }
+}
+function Invoke-StorageCleanup([bool]$Old) {
+    $n = 0; $b = 0L
+    foreach ($d in @(Get-SpareDownloads -Old:$Old)) {
+        try { Remove-Item -LiteralPath (Join-Path (Get-CpPaths).downloads $d.file) -Force; $n++; $b += $d.size } catch { Write-Note "  cleanup kept $($d.file): $($_.Exception.Message)" }
+    }
+    # leftovers of interrupted installs; installs run under the same lock and the share package is done within the hour
+    $cut = (Get-Date).AddHours(-1)
+    foreach ($e in @(Get-ChildItem -LiteralPath (Join-Path (Get-CpPaths).root 'tmp') -Force -ErrorAction SilentlyContinue | Where-Object { $_.LastWriteTime -lt $cut })) {
+        $u = if ($e.PSIsContainer) { (Get-DirUse $e.FullName).bytes } else { $e.Length }
+        try { Remove-Item -LiteralPath $e.FullName -Recurse -Force; $b += $u } catch { }
+    }
+    $mb = [Math]::Round($b / 1MB)
+    Write-Note "Disk cleanup: deleted $n download(s), $mb MB freed"
+    "Deleted $n download$(if ($n -ne 1) { 's' }), $mb MB freed"
 }
 #endregion
 

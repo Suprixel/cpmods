@@ -16,7 +16,8 @@
   const PAGE = 40;
   const MOD_FIELDS = 'modId name summary version author updatedAt createdAt endorsements downloads adultContent thumbnailUrl thumbnailLargeUrl modCategory { name } uploader { name } tags { name }';
   const REQ_FIELDS = 'modRequirements { nexusRequirements { nodes { modId modName notes externalRequirement } } }';
-  const PAGES = [['discover', 'Discover'], ['collections', 'Collections'], ['library', 'Library'], ['downloads', 'Downloads'], ['game', 'Game'], ['settings', 'Settings']];
+  // Game: play, launch options, folders, saves; Reports: what happened when the game ran
+  const PAGES = [['discover', 'Discover'], ['collections', 'Collections'], ['library', 'Library'], ['downloads', 'Downloads'], ['game', 'Game'], ['reports', 'Reports'], ['settings', 'Settings']];
   // what each kind of installed file is, in plain words (server: Get-FileKind)
   const KIND = {
     archive: { l: 'Assets', i: 'box', c: 'k-assets', t: 'Game assets (.archive): models, textures, sounds or game data. The game loads these itself.' },
@@ -85,6 +86,7 @@
     folder: '<path d="M3.5 6.5a1 1 0 0 1 1-1h5l2 2.5h8a1 1 0 0 1 1 1v9a1 1 0 0 1-1 1h-15a1 1 0 0 1-1-1z"/>',
     scan: '<path d="M4 8V5a1 1 0 0 1 1-1h3M16 4h3a1 1 0 0 1 1 1v3M20 16v3a1 1 0 0 1-1 1h-3M8 20H5a1 1 0 0 1-1-1v-3"/><path d="M8 12h8"/>',
     game: '<rect x="2.5" y="7" width="19" height="11" rx="5"/><path d="M7.5 10.5v4M5.5 12.5h4"/><path d="M15.5 11.5h.01M18 13.5h.01"/>',
+    reports: '<rect x="5" y="4.5" width="14" height="16.5" rx="2"/><path d="M9 4.5V3h6v1.5"/><path d="M8.5 10h7M8.5 13.5h7M8.5 17h4"/>',
     sidemin: '<rect x="3.5" y="4.5" width="17" height="15" rx="2"/><path d="M9 4.5v15"/><path d="m15.5 9.5-2.5 2.5 2.5 2.5"/>',
     sidemax: '<rect x="3.5" y="4.5" width="17" height="15" rx="2"/><path d="M9 4.5v15"/><path d="m13 9.5 2.5 2.5-2.5 2.5"/>',
     map: '<path d="M9 4 3.5 6v14L9 18l6 2 5.5-2V4L15 6z"/><path d="M9 4v14M15 6v14"/>',
@@ -125,7 +127,8 @@
     lib: Object.assign({ filter: 'all', q: '', sort: 'name', kind: '', src: '', view: 'list' }, prefs.lib || {}, { updates: null, fw: null, checking: false, compat: null, compatLoading: false, files: null, filesSig: '', filesLoading: false, mapOpen: new Set() }),
     dl: Object.assign({ arch: 'all', sort: 'new', jobs: 'all' }, prefs.dl || {}, { variant: null, q: '', showDone: false }),
     launch: { data: null, loading: false, err: null, key: '' },
-    game: { mods: 'problems', tab: '' },
+    rep: { mods: 'problems', tab: '', showHidden: false },
+    disk: null,
     wasRunning: null, killedAt: 0, stSig: '',
   };
   // writes HTML only when it changed (polling re-renders the shell every few seconds)
@@ -147,8 +150,9 @@
       page: S.page, paneW: prefs.paneW || undefined, reqMissingOnly: prefs.reqMissingOnly || undefined, sideMin: prefs.sideMin || undefined, explain: prefs.explain === true ? true : undefined, flowHelp: prefs.flowHelp || undefined,
       b: pick(S.b, ['sort', 'cat', 'tag', 'compat', 'hideTr', 'hideAdult', 'hideCheats', 'hideCosmetic', 'view']), c: pick(S.c, ['sort', 'cat', 'only', 'adult']),
       lib: pick(S.lib, ['sort', 'kind', 'src', 'view']), dl: pick(S.dl, ['arch', 'sort', 'jobs']),
-      theme: prefs.theme && prefs.theme !== 'yellow' ? prefs.theme : undefined, custom: prefs.custom || undefined, themeVars: prefs.theme === 'custom' ? prefs.themeVars : undefined,
-      perf: prefs.perf || undefined,
+      theme: prefs.theme && prefs.theme !== 'yellow' ? prefs.theme : undefined, custom: prefs.custom || undefined, themeVars: prefs.themeVars || undefined,
+      bg: prefs.bg && prefs.bg !== 'match' ? prefs.bg : undefined, customBg: prefs.customBg || undefined,
+      perf: prefs.perf || undefined, hideIssues: prefs.hideIssues && prefs.hideIssues.length ? prefs.hideIssues : undefined,
     });
     clearTimeout(prefsTimer);
     prefsTimer = setTimeout(flushPrefs, 400);
@@ -220,14 +224,14 @@
     const later = key === 'window' || key === 'gpu';
     toast('Saved', later ? 'Applies the next time cpmods opens.' : '', 'ok', later ? 4000 : 1500);
   }
-  // light mode while the game runs: Game page, every picture unloaded, slower refresh (the server lowers itself too)
+  // light mode while the game runs: Reports page, every picture unloaded, slower refresh (the server lowers itself too)
   function applyLean() {
     const on = !!(perf().lean && S.st && S.st.game && S.st.game.running);
     document.documentElement.classList.toggle('lean', on);
     if (on === !!S.lean) return;
     S.lean = on;
     IMG.pause(on);
-    if (on) { closeLightbox(); if (S.page !== 'game' && !typing()) go('game'); else if (S.pane) renderPane(); }
+    if (on) { closeLightbox(); if (S.page !== 'reports' && !typing()) go('reports'); else if (S.pane) renderPane(); }
     else if (S.pane) renderPane();
   }
 
@@ -275,53 +279,130 @@
       '--btn-top': n(11.5, 10), '--btn-bot': n(9.5, 10), '--img-bg': n(3.6, 10), '--scroll': n(20, 8), '--scroll-hover': n(26, 8),
     };
   }
-  const CUSTOM_KEYS = Object.keys(customVars('#808080'));
+  // backgrounds: Matching keeps the color's own (its CSS block, or the Custom tint); the others replace every surface color
+  const BGS = [
+    { id: 'match', name: 'Matching', sub: 'Follows the color' },
+    { id: 'grey', name: 'Grey', sub: 'Soft dark grey' },
+    { id: 'black', name: 'Black', sub: 'Neutral black' },
+    { id: 'oled', name: 'OLED black', sub: 'Pure black' },
+    { id: 'white', name: 'White', sub: 'Light mode' },
+    { id: 'custom', name: 'Custom', sub: 'Your color' },
+  ];
+  const BG_DEFAULT = '#17223a';
+  const BG_PRESETS = [['#17223a', 'Navy'], ['#221a35', 'Violet'], ['#10292c', 'Teal'], ['#15281c', 'Forest'], ['#2c1720', 'Wine'], ['#2b2219', 'Brown'], ['#1d1d20', 'Graphite']];
+  // dark surfaces from one hue and a base lightness, in the same steps as the built-in dark themes; text stays light
+  function darkBg(hu, s, L) {
+    const n = (d, sat) => hslHex(hu, Math.min(s, sat), Math.max(0, L + d));
+    const bg = n(0, 40);
+    return {
+      '--bg': bg, '--side': n(1.5, 40), '--surface': n(4, 38), '--raised': n(7, 36), '--hover': n(10.5, 34), '--line': n(10.4, 34), '--line2': n(16, 30), '--line3': n(22, 28),
+      '--bg-rgb': hexRgb(bg).join(', '), '--btn-top': n(9, 34), '--btn-bot': n(6.4, 36), '--img-bg': n(-0.5, 40), '--scroll': n(14.8, 30), '--scroll-hover': n(20.5, 28),
+      '--text': hslHex(hu, Math.min(s, 8), 92.5), '--text2': hslHex(hu, Math.min(s, 10), 68.5), '--text3': hslHex(hu, Math.min(s, 10), 49),
+    };
+  }
+  // light mode: dark text, darker status colors so they stay readable on white (CSS [data-bg="white"] handles the rest)
+  const WHITE = {
+    '--bg': '#eef0f3', '--side': '#e7eaee', '--surface': '#ffffff', '--raised': '#f7f8fa', '--hover': '#eceff3', '--line': '#e1e5ea', '--line2': '#d0d6dd', '--line3': '#b7bfc9',
+    '--text': '#15191f', '--text2': '#47505c', '--text3': '#646d79', '--bg-rgb': '238, 240, 243', '--btn-top': '#ffffff', '--btn-bot': '#f2f4f7', '--img-bg': '#e2e6eb', '--scroll': '#c3cad3', '--scroll-hover': '#a9b2bd',
+    '--ok': '#167a4d', '--warn': '#9a5d00', '--bad': '#c4352d', '--info': '#0a6f94',
+    '--card-bg': 'var(--surface)', '--card-shadow': '0 1px 2px rgba(16, 24, 40, .06), 0 8px 24px -18px rgba(16, 24, 40, .25)',
+  };
+  function bgVars(id) {
+    if (id === 'grey') return darkBg(220, 5, 11);
+    if (id === 'black') return darkBg(220, 0, 3.5);
+    if (id === 'oled') return Object.assign(darkBg(0, 0, 0), { '--side': '#000000', '--img-bg': '#000000' });
+    if (id === 'white') return Object.assign({}, WHITE);
+    if (id === 'custom') { const [hu, s, l] = rgbHsl(...hexRgb(prefs.customBg || BG_DEFAULT)); return darkBg(hu, s, Math.min(16, l)); }
+    return {};
+  }
+  // on White the accent needs a darker text color and pale tints
+  function lightAccentVars(hex) {
+    const [r, g, b] = hexRgb(hex), [hu, s, l0] = rgbHsl(r, g, b);
+    let l = l0, t = hex;
+    while (contrast(t, '#ffffff') < 4.6 && l > 4) { l -= 2; t = hslHex(hu, s, l); }
+    return { '--accent-text': t, '--accent-line': hslHex(hu, Math.min(s, 60), 78), '--accent-soft': hslHex(hu, Math.min(s, 75), 94), '--accent-glow': `rgba(${r}, ${g}, ${b}, .35)` };
+  }
+  const ACCENT_OF = { yellow: '#f0df4a', red: '#ff3349', dual: '#f3df4b' };
+  const THEME_KEYS = [...new Set([...Object.keys(customVars('#808080')), ...Object.keys(WHITE), ...Object.keys(darkBg(0, 0, 5)), ...Object.keys(lightAccentVars('#808080'))])];
   const themeId = () => THEMES.some(t => t.id === prefs.theme) ? prefs.theme : 'yellow';
+  const bgId = () => BGS.some(b => b.id === prefs.bg) ? prefs.bg : 'match';
+  function themeVars() {
+    const id = themeId(), bg = bgId(), v = id === 'custom' ? customVars(prefs.custom || CUSTOM_DEFAULT) : {};
+    if (bg !== 'match') Object.assign(v, bgVars(bg));
+    if (bg === 'white') Object.assign(v, lightAccentVars(id === 'custom' ? prefs.custom || CUSTOM_DEFAULT : ACCENT_OF[id]));
+    return v;
+  }
   function applyTheme() {
-    const root = document.documentElement, id = themeId();
-    for (const k of CUSTOM_KEYS) root.style.removeProperty(k);
-    if (id === 'custom') { const v = customVars(prefs.custom || CUSTOM_DEFAULT); for (const k in v) root.style.setProperty(k, v[k]); prefs.themeVars = v; }
-    else delete prefs.themeVars;
+    const root = document.documentElement, id = themeId(), bg = bgId(), v = themeVars();
+    for (const k of THEME_KEYS) root.style.removeProperty(k);
+    for (const k in v) root.style.setProperty(k, v[k]);
+    // saved with the preferences: index.html applies them before the first paint
+    prefs.themeVars = Object.keys(v).length ? v : undefined;
     if (id === 'yellow') root.removeAttribute('data-theme'); else root.setAttribute('data-theme', id);
+    if (bg === 'match') root.removeAttribute('data-bg'); else root.setAttribute('data-bg', bg);
     sendWinTheme();
   }
-  const cwOf = x => { const [hu, s, l] = rgbHsl(...hexRgb(x)); return { h: Math.round(hu), s: Math.round(s), l: Math.round(Math.max(35, Math.min(80, l))) }; };
+  // two pickers (accent, background) share the wheel, brightness, code and dots
+  const PICKERS = {
+    cw: { title: 'Custom color', help: 'Drag on the wheel or pick a dot. With the Matching background the panels take a tint of it too.', cur: () => prefs.custom || CUSTOM_DEFAULT, lmin: 35, lmax: 80, dots: PRESETS, on: () => themeId() === 'custom', set: (x, save) => setCustom(x, save), prev: x => customVars(x)['--accent-fill'] },
+    bw: { title: 'Custom background', help: 'The wheel tints every panel; brightness sets how dark they are. Text stays light.', cur: () => prefs.customBg || BG_DEFAULT, lmin: 0, lmax: 16, dots: BG_PRESETS, on: () => bgId() === 'custom', set: (x, save) => setCustomBg(x, save), prev: x => x },
+  };
+  const cwOf = (x, k = 'cw') => { const P = PICKERS[k], [hu, s, l] = rgbHsl(...hexRgb(x)); return { h: Math.round(hu), s: Math.round(s), l: Math.round(Math.max(P.lmin, Math.min(P.lmax, l))) }; };
   const knobCss = cw => `left:${(50 + Math.cos(cw.h * Math.PI / 180) * cw.s / 2).toFixed(2)}%;top:${(50 + Math.sin(cw.h * Math.PI / 180) * cw.s / 2).toFixed(2)}%`;
+  // a color card shows its color on the chosen background
   function swatchOf(t) {
-    if (t.id !== 'custom') return t;
+    const bgv = bgId() === 'match' ? null : bgVars(bgId());
+    if (t.id !== 'custom') return bgv ? Object.assign({}, t, { bg: bgv['--surface'] }) : t;
     const hex = prefs.custom || CUSTOM_DEFAULT, v = customVars(hex);
-    return { bg: v['--surface'], fill: v['--accent-fill'], bar: hex };
+    return { bg: bgv ? bgv['--surface'] : v['--surface'], fill: v['--accent-fill'], bar: hex };
   }
+  // a background card shows the current color on that background
+  function bgSwatch(b) {
+    const t = THEMES.find(x => x.id === themeId()), hex = prefs.custom || CUSTOM_DEFAULT, own = t.id === 'custom' ? customVars(hex) : null;
+    return { bg: b.id === 'match' ? (own ? own['--surface'] : t.bg) : bgVars(b.id)['--surface'], fill: own ? own['--accent-fill'] : t.fill, bar: own ? hex : t.bar, ln: b.id === 'white' ? 'rgba(16, 24, 40, .16)' : '' };
+  }
+  const swHtml = sw => `<span class="theme-sw" style="--sw-bg:${sw.bg};--sw-fill:${sw.fill};--sw-bar:${sw.bar}${sw.ln ? ';--sw-ln:' + sw.ln : ''}"><i></i><i></i><b></b><em></em></span>`;
   function appearanceHtml() {
-    const cur = themeId(), hex = prefs.custom || CUSTOM_DEFAULT, cw = S.cw || cwOf(hex);
-    const card = t => { const sw = swatchOf(t); return `<label class="theme-opt${cur === t.id ? ' on' : ''}" data-theme-opt="${t.id}"><input type="radio" name="theme" value="${t.id}"${cur === t.id ? ' checked' : ''}><span class="theme-sw" style="--sw-bg:${sw.bg};--sw-fill:${sw.fill};--sw-bar:${sw.bar}"><i></i><i></i><b></b><em></em></span><span class="theme-name">${h(t.name)}</span><span class="theme-sub">${h(t.sub)}</span></label>`; };
-    return `<div class="themes" role="radiogroup" aria-label="Theme">${THEMES.map(card).join('')}</div>
-      <div class="cpick${cur === 'custom' ? '' : ' idle'}" id="cpick" style="--wl:${cw.l}%;--wh:${cw.h};--ws:${cw.s}%">
-        <div class="wheel" id="cw" tabindex="0" role="slider" aria-label="Custom color: drag around the wheel for the color, toward the edge for stronger color; arrow keys work too" aria-valuetext="${hex}"><span class="wheel-knob" id="cw-knob" style="${knobCss(cw)};--knob:${hex}"></span></div>
+    const cur = themeId(), bg = bgId();
+    const tcard = t => `<label class="theme-opt${cur === t.id ? ' on' : ''}" data-theme-opt="${t.id}"><input type="radio" name="theme" value="${t.id}"${cur === t.id ? ' checked' : ''}>${swHtml(swatchOf(t))}<span class="theme-name">${h(t.name)}</span><span class="theme-sub">${h(t.sub)}</span></label>`;
+    const bcard = b => `<label class="theme-opt${bg === b.id ? ' on' : ''}" data-bg-opt="${b.id}"><input type="radio" name="bg" value="${b.id}"${bg === b.id ? ' checked' : ''}>${swHtml(bgSwatch(b))}<span class="theme-name">${h(b.name)}</span><span class="theme-sub">${h(b.sub)}</span></label>`;
+    return `<div class="sub-label">Color</div><div class="themes" role="radiogroup" aria-label="Color">${THEMES.map(tcard).join('')}</div>${pickerHtml('cw')}
+      <div class="sub-label">Background</div><div class="themes" role="radiogroup" aria-label="Background">${BGS.map(bcard).join('')}</div>${bg === 'custom' ? pickerHtml('bw') : ''}`;
+  }
+  function pickerHtml(k) {
+    const P = PICKERS[k], hex = P.cur(), cw = S[k] || cwOf(hex, k);
+    // the background wheel is drawn mid-bright so its hues stay visible; the slider sets the real (dark) brightness
+    return `<div class="cpick${P.on() ? '' : ' idle'}${k === 'bw' ? ' bgpick' : ''}" id="${k}-box" style="--wl:${k === 'bw' ? 45 : cw.l}%;--wh:${cw.h};--ws:${cw.s}%">
+        <div class="wheel" id="${k}" tabindex="0" role="slider" aria-label="${h(P.title)}: drag around the wheel for the color, toward the edge for stronger color; arrow keys work too" aria-valuetext="${hex}"><span class="wheel-knob" id="${k}-knob" style="${knobCss(cw)};--knob:${hex}"></span></div>
         <div class="cpick-side">
-          <div class="cpick-head"><b>Custom color</b><span>Drag on the wheel or pick a dot. The whole app follows, backgrounds included.</span></div>
-          <div class="cpick-row"><label for="cw-l">Brightness</label><input type="range" class="light-range" id="cw-l" min="35" max="80" step="1" value="${cw.l}"></div>
-          <div class="cpick-row"><label for="cw-hex">Color code</label><input type="text" class="hex-in" id="cw-hex" value="${hex}" maxlength="7" spellcheck="false" autocomplete="off"><span class="cpick-prev" id="cw-prev" style="background:${customVars(hex)['--accent-fill']}"></span></div>
-          <div class="cc-dots">${PRESETS.map(([c, nm]) => `<button class="cc-dot" data-act="cw-preset" data-v="${c}" style="background:${c}" title="${nm}" aria-label="${nm}"></button>`).join('')}</div>
+          <div class="cpick-head"><b>${h(P.title)}</b><span>${h(P.help)}</span></div>
+          <div class="cpick-row"><label for="${k}-l">Brightness</label><input type="range" class="light-range" id="${k}-l" min="${P.lmin}" max="${P.lmax}" step="1" value="${cw.l}"></div>
+          <div class="cpick-row"><label for="${k}-hex">Color code</label><input type="text" class="hex-in" id="${k}-hex" value="${hex}" maxlength="7" spellcheck="false" autocomplete="off"><span class="cpick-prev" id="${k}-prev" style="background:${P.prev(hex)}"></span></div>
+          <div class="cc-dots">${P.dots.map(([c, nm]) => `<button class="cc-dot" data-act="pick-preset" data-k="${k}" data-v="${c}" style="background:${c}" title="${nm}" aria-label="${nm}"></button>`).join('')}</div>
         </div>
       </div>`;
   }
-  // updates the picker in place (no re-render, so a drag keeps going)
+  // updates pickers and cards in place (no re-render, so a drag keeps going)
   function syncPicker() {
-    const box = $('#cpick');
-    if (!box) return;
-    const hex = prefs.custom || CUSTOM_DEFAULT, cw = S.cw || cwOf(hex), cur = themeId();
-    box.classList.toggle('idle', cur !== 'custom');
-    box.style.setProperty('--wl', cw.l + '%'); box.style.setProperty('--wh', cw.h); box.style.setProperty('--ws', cw.s + '%');
-    const k = $('#cw-knob');
-    if (k) { k.setAttribute('style', `${knobCss(cw)};--knob:${hex}`); }
-    const w = $('#cw'); if (w) w.setAttribute('aria-valuetext', hex);
-    const hx = $('#cw-hex'); if (hx && document.activeElement !== hx) hx.value = hex;
-    const lr = $('#cw-l'); if (lr && document.activeElement !== lr) lr.value = cw.l;
-    const pv = $('#cw-prev'); if (pv) pv.style.background = customVars(hex)['--accent-fill'];
-    document.querySelectorAll('.theme-opt').forEach(o => { const on = o.dataset.themeOpt === cur; o.classList.toggle('on', on); const i = o.querySelector('input'); if (i) i.checked = on; });
-    const cs = $('.theme-opt[data-theme-opt="custom"] .theme-sw');
-    if (cs) { const sw = swatchOf({ id: 'custom' }); cs.style.setProperty('--sw-bg', sw.bg); cs.style.setProperty('--sw-fill', sw.fill); cs.style.setProperty('--sw-bar', sw.bar); }
+    for (const k of Object.keys(PICKERS)) {
+      const box = $(`#${k}-box`);
+      if (!box) continue;
+      const P = PICKERS[k], hex = P.cur(), cw = S[k] || cwOf(hex, k);
+      box.classList.toggle('idle', !P.on());
+      if (k === 'cw') box.style.setProperty('--wl', cw.l + '%');
+      box.style.setProperty('--wh', cw.h); box.style.setProperty('--ws', cw.s + '%');
+      const kn = $(`#${k}-knob`); if (kn) kn.setAttribute('style', `${knobCss(cw)};--knob:${hex}`);
+      const w = $('#' + k); if (w) w.setAttribute('aria-valuetext', hex);
+      const hx = $(`#${k}-hex`); if (hx && document.activeElement !== hx) hx.value = hex;
+      const lr = $(`#${k}-l`); if (lr && document.activeElement !== lr) lr.value = cw.l;
+      const pv = $(`#${k}-prev`); if (pv) pv.style.background = P.prev(hex);
+    }
+    const cur = themeId(), bg = bgId();
+    const mark = (o, on, sw) => { o.classList.toggle('on', on); const i = o.querySelector('input'); if (i) i.checked = on; const e = o.querySelector('.theme-sw'); if (!e) return; e.style.setProperty('--sw-bg', sw.bg); e.style.setProperty('--sw-fill', sw.fill); e.style.setProperty('--sw-bar', sw.bar); if (sw.ln) e.style.setProperty('--sw-ln', sw.ln); else e.style.removeProperty('--sw-ln'); };
+    document.querySelectorAll('[data-theme-opt]').forEach(o => mark(o, o.dataset.themeOpt === cur, swatchOf(THEMES.find(t => t.id === o.dataset.themeOpt))));
+    document.querySelectorAll('[data-bg-opt]').forEach(o => mark(o, o.dataset.bgOpt === bg, bgSwatch(BGS.find(b => b.id === o.dataset.bgOpt))));
+    const sum = $('#sx-look .sx-t span');
+    if (sum) sum.textContent = sectionSummary('look');
   }
   function setTheme(id) {
     prefs.theme = id;
@@ -331,6 +412,21 @@
   }
   function setCustom(hex, save) {
     prefs.custom = hex; prefs.theme = 'custom';
+    applyTheme(); syncPicker();
+    if (save) savePrefs();
+  }
+  function setBg(id) {
+    prefs.bg = id;
+    if (id === 'custom' && !prefs.customBg) prefs.customBg = BG_DEFAULT;
+    S.bw = null;
+    applyTheme();
+    // the background picker only shows for Custom
+    const b = $('#sxb-look');
+    if (b) b.innerHTML = appearanceHtml(); else syncPicker();
+    savePrefs();
+  }
+  function setCustomBg(hex, save) {
+    prefs.customBg = hex; prefs.bg = 'custom';
     applyTheme(); syncPicker();
     if (save) savePrefs();
   }
@@ -345,9 +441,9 @@
   function fmtNum(n) { n = +n || 0; if (n >= 1e6) return (n / 1e6).toFixed(n >= 1e7 ? 0 : 1) + 'M'; if (n >= 1e3) return (n / 1e3).toFixed(n >= 1e4 ? 0 : 1) + 'k'; return String(n); }
   function toDate(v) { if (v == null || v === '') return null; const d = typeof v === 'number' ? new Date(v * 1000) : new Date(v); return isNaN(d) ? null : d; }
   function fmtDate(v) { const d = toDate(v); return d ? d.toLocaleDateString('en-GB', { year: 'numeric', month: 'short', day: 'numeric' }) : '?'; }
-  function fmtSize(b) { b = +b || 0; if (b >= 1073741824) return (b / 1073741824).toFixed(2) + ' GB'; if (b >= 1048576) return (b / 1048576).toFixed(1) + ' MB'; if (b >= 1024) return Math.round(b / 1024) + ' KB'; return b + ' B'; }
+  function fmtSize(b) { b = +b || 0; if (b >= 1099511627776) return (b / 1099511627776).toFixed(2) + ' TB'; if (b >= 1073741824) return (b / 1073741824).toFixed(2) + ' GB'; if (b >= 1048576) return (b / 1048576).toFixed(1) + ' MB'; if (b >= 1024) return Math.round(b / 1024) + ' KB'; return b + ' B'; }
   const opt = (list, cur) => list.map(([v, l]) => `<option value="${h(v)}"${v === cur ? ' selected' : ''}>${h(l)}</option>`).join('');
-  const plural = (n, w) => `${n} ${w}${n === 1 ? '' : 's'}`;
+  const plural = (n, w, pl) => `${n} ${n === 1 ? w : pl || w + 's'}`;
   const typing = () => { const a = document.activeElement; return !!a && /INPUT|SELECT|TEXTAREA/.test(a.tagName) && a.type !== 'checkbox' && a.type !== 'radio' && a.type !== 'file'; };
   const callout = (kind, html) => `<div class="callout ${kind}">${ic(kind === 'ok' ? 'check' : kind === 'info' || kind === 'neutral' ? 'info' : 'alert')}<div>${html}</div></div>`;
   function fmtTime(v) { const d = toDate(v); return d ? d.toLocaleTimeString('en-GB', { hour: '2-digit', minute: '2-digit' }) : '?'; }
@@ -466,8 +562,8 @@
       const run = st.jobs.filter(j => j.status === 'running').length, att = st.failed.length, qn = st.queue.filter(q => !q.done).length;
       if (run || att || qn) counts.downloads = [run || att || qn, !!(run || att)];
       const lt = st.launch, bs = st.bisect;
-      if (bs && bs.active) counts.game = [bs.phase === 'done' ? 'done' : 'R' + bs.round, true];
-      else if (lt && lt.result === 'crash' && !lt.running) counts.game = ['!', true];
+      if (bs && bs.active) counts.reports = [bs.phase === 'done' ? 'done' : 'R' + bs.round, true];
+      else if (lt && lt.result === 'crash' && !lt.running) counts.reports = ['!', true];
     }
     setHtml($('#nav'), PAGES.map(([k, l]) => `<button class="nav-item${S.page === k ? ' active' : ''}" data-act="go" data-page="${k}"${S.page === k ? ' aria-current="page"' : ''} title="${l}">${ic(k)}<span>${l}</span>${counts[k] ? `<span class="nav-count${counts[k][1] ? ' hot' : ''}">${counts[k][0]}</span>` : ''}</button>`).join(''));
   }
@@ -478,7 +574,7 @@
   const killBtn = wide => { const p = gameProcs(); return p.length ? `<button class="btn kill${wide ? '' : ' icon-only'}" data-act="kill" title="Force close ${h(p.map(x => PROC_LABEL[x] || x).join(', '))}" aria-label="Force close the game">${ic('stop')}${wide ? '<span>Force close</span>' : ''}</button>` : ''; };
   function renderSideFoot() {
     const st = S.st, g = st && st.game, lt = launchSt();
-    const last = lt && lt.start ? `<button class="gc-last" data-act="go" data-page="game" title="Open the launch report"><span class="dot ${resultDot(lt.result)}"></span><span>Last launch ${h(fmtWhen(lt.start))}: ${h(resultWord(lt.result))}</span></button>` : '';
+    const last = lt && lt.start ? `<button class="gc-last" data-act="go" data-page="reports" title="Open the launch report"><span class="dot ${resultDot(lt.result)}"></span><span>Last launch ${h(fmtWhen(lt.start))}: ${h(resultWord(lt.result))}</span></button>` : '';
     const mode = st && st.settings && st.settings.launchMode === 'direct' ? 'directly (Cyberpunk2077.exe)' : 'through Steam';
     const left = !g ? [] : gameProcs().filter(x => x !== 'Cyberpunk2077');
     const sub = !g ? '' : g.missing ? 'not found' : g.running ? 'running' : left.length ? 'closing' : g.updatePending ? 'update pending' : 'ready';
@@ -497,8 +593,8 @@
     if (vn) bn.push(`<div class="banner info">${ic('info')}<span><b>Playing without mods.</b> ${vn.seen ? 'Your mods come back as soon as the game closes.' : 'Your mods are set aside inside the game folder and come back when the game closes.'}</span><button class="btn sm" data-act="vanilla-back"${g && g.running ? ' disabled title="Close the game first"' : ''}>Bring mods back now</button></div>`);
     const bs = st && st.bisect;
     if (bs && bs.active) {
-      if (bs.phase === 'done') bn.push(`<div class="banner info">${ic('bug')}<span><b>Troubleshooting finished.</b> ${bs.outcome === 'found' ? `The problem points to ${h(bs.culprit)}.` : 'See the result on the Game page.'}</span><button class="btn sm" data-act="go" data-page="game">Open</button></div>`);
-      else bn.push(`<div class="banner info">${ic('bug')}<span><b>Troubleshooting, round ${+bs.round}:</b> ${plural((bs.suspects || []).length, 'mod')} still suspected. Launch the game, then tell cpmods whether the problem happened.</span><button class="btn sm primary" data-act="go" data-page="game">Answer</button></div>`);
+      if (bs.phase === 'done') bn.push(`<div class="banner info">${ic('bug')}<span><b>Troubleshooting finished.</b> ${bs.outcome === 'found' ? `The problem points to ${h(bs.culprit)}.` : 'See the result on the Reports page.'}</span><button class="btn sm" data-act="go" data-page="reports">Open</button></div>`);
+      else bn.push(`<div class="banner info">${ic('bug')}<span><b>Troubleshooting, round ${+bs.round}:</b> ${plural((bs.suspects || []).length, 'mod')} still suspected. Launch the game, then tell cpmods whether the problem happened.</span><button class="btn sm primary" data-act="go" data-page="reports">Answer</button></div>`);
     }
     if (g && g.missing) bn.push(`<div class="banner bad">Cyberpunk 2077 is not in ${h(st.paths.game)} any more. If you moved it, run Install.cmd again so cpmods finds it.</div>`);
     if (g && g.updatePending) bn.push(`<div class="banner">Steam has a Cyberpunk update pending. Downloads wait and installs are blocked until the game is updated.</div>`);
@@ -537,7 +633,7 @@
     return r + '/tool/' + p.kind;
   }
   function parseRoute(hash) {
-    const m = String(hash || '').match(/^#\/(discover|collections|library|downloads|game|settings)(?:\/(mod|col|tool|files|crash|preview)\/(.+))?$/);
+    const m = String(hash || '').match(/^#\/(discover|collections|library|downloads|game|reports|settings)(?:\/(mod|col|tool|files|crash|preview)\/(.+))?$/);
     if (!m) return null;
     let arg = m[3] || '';
     try { arg = decodeURIComponent(arg); } catch (e) { /* keep raw */ }
@@ -678,6 +774,7 @@
     if (S.page === 'library') return pageLibrary(el);
     if (S.page === 'downloads') return pageDownloads(el);
     if (S.page === 'game') return pageGame(el);
+    if (S.page === 'reports') return pageReports(el);
     return pageSettings(el);
   }
 
@@ -1051,6 +1148,7 @@
   async function checkUpdates() {
     S.lib.checking = true;
     if (S.page === 'library' && !typing()) pageLibrary($('#page'));
+    else if (S.page === 'reports') renderReportsBody();
     try {
       const nexus = stMods().filter(m => /^nexus:/.test(m.source || '') && m.modId);
       const ids = [...new Set(nexus.map(m => +m.modId))], files = {};
@@ -1076,6 +1174,7 @@
     } catch (e) { toast('Update check failed', e.message, 'bad'); }
     S.lib.checking = false;
     if (S.page === 'library') pageLibrary($('#page'));
+    else if (S.page === 'reports') renderReportsBody();
   }
 
   // ---------- downloads ----------
@@ -1179,44 +1278,46 @@
       <div class="li-acts">${d.status === 'unused' ? `<button class="btn sm" data-act="dl-install" data-archive="${h(d.file)}">Install</button>` : ''}<button class="icon-btn" data-act="dl-menu" data-file="${h(d.file)}" data-status="${h(d.status)}" data-mod="${+d.modId || ''}" title="More actions" aria-label="More actions">${ic('more')}</button></div></div>`;
   }
 
-  // ---------- game: launch, last launch report, crashes, folders, troubleshooting ----------
+  // ---------- reports: last launch report, what to fix, crashes, past launches, troubleshooting ----------
   const launchKey = () => { const l = launchSt(); return l ? [l.log, l.end, l.lastCrash, l.result].join('|') : ''; };
   async function loadLaunch(fresh) {
     const L = S.launch;
     if (L.loading) return;
     L.loading = true;
-    if (S.page === 'game' && !L.data) renderGameBody();
+    if (S.page === 'reports' && !L.data) renderReportsBody();
     try { L.data = await api('/api/launch' + (fresh ? '?fresh=1' : '')); L.err = null; L.key = launchKey(); }
     catch (e) { L.err = e.message; }
     L.loading = false;
-    if (S.page === 'game') renderGameBody();
+    if (S.page === 'reports') renderReportsBody();
+    // the Game page shows the Steam launch options read with the report
+    else if (S.page === 'game' && !typing()) renderPage();
     if (S.pane && ['mod', 'files', 'crash', 'bisect'].includes(S.pane.kind)) renderPane();
   }
-  function pageGame(el) {
+  function pageReports(el) {
     el.innerHTML = `
       <header class="page-head"><div class="ph-top">
-        <div><h1>Game</h1><p class="sub">How the last launch went, what to fix, crash reports and game folders.</p></div>
-        <div class="ph-actions" id="game-acts"></div>
+        <div><h1>Reports</h1><p class="sub">How the last launch went, what to fix, crash reports and past launches.</p></div>
+        <div class="ph-actions" id="rep-acts"></div>
       </div></header>
-      <div class="page-body" id="game-body"></div>`;
-    renderGameActs();
-    renderGameBody();
+      <div class="page-body" id="rep-body"></div>`;
+    renderReportsActs();
+    renderReportsBody();
     if (!S.launch.data || S.launch.key !== launchKey()) loadLaunch(false);
   }
-  function renderGameActs() {
+  function renderReportsActs() {
     const g = S.st.game;
-    setHtml($('#game-acts'), `<button class="icon-btn" data-act="launch-refresh" title="Read the logs again" aria-label="Read the logs again">${ic('refresh')}</button>${killBtn(true)}<button class="btn primary" data-act="play"${g.running || g.missing ? ' disabled' : ''}>${ic('play')}${g.running ? 'Running' : 'Play'}</button>`);
+    setHtml($('#rep-acts'), `<button class="icon-btn" data-act="launch-refresh" title="Read the logs again" aria-label="Read the logs again">${ic('refresh')}</button>${killBtn(true)}<button class="btn primary" data-act="play"${g.running || g.missing ? ' disabled' : ''}>${ic('play')}${g.running ? 'Running' : 'Play'}</button>`);
   }
-  function renderGameBody() {
-    const body = $('#game-body');
+  function renderReportsBody() {
+    const body = $('#rep-body');
     if (!body) return;
     const L = S.launch, d = L.data;
     if (!d) { body.innerHTML = bisectCard() + (L.err ? `<div class="err">${h(L.err)}</div>` : '<div class="card"><div class="card-body"><span class="spin"></span> Reading the game and mod logs</div></div>'); return; }
-    const tabs = [['mods', 'Mods on last launch', (d.mods || []).length], ['crashes', 'Crash reports', (d.crashes || []).length], ['history', 'Recent launches', (d.history || []).length], ['folders', 'Folders', null]];
-    const tab = S.game.tab || (d.session && d.session.result === 'crash' ? 'crashes' : 'mods');
-    const panel = { mods: launchModsCard, crashes: crashesCard, history: historyCard, folders: foldersCard }[tab] || launchModsCard;
+    const tabs = [['mods', 'Mods on last launch', (d.mods || []).length], ['crashes', 'Crash reports', (d.crashes || []).length], ['history', 'Recent launches', (d.history || []).length]];
+    const tab = tabs.some(x => x[0] === S.rep.tab) ? S.rep.tab : d.session && d.session.result === 'crash' ? 'crashes' : 'mods';
+    const panel = { mods: launchModsCard, crashes: crashesCard, history: historyCard }[tab];
     body.innerHTML = `${bisectCard()}${d.none ? '<div class="card"><div class="empty"><h3>No launch recorded yet</h3>Launch the game once with mods installed; cpmods then explains what loaded and what did not.</div></div>' : lastLaunchCard(d)}
-      <div class="tabbar" role="tablist">${tabs.map(([v, l, n]) => `<button class="tabbar-btn${tab === v ? ' on' : ''}" data-act="game-tab" data-v="${v}" role="tab" aria-selected="${tab === v}">${l}${n != null ? `<span class="n${v === 'crashes' && n ? ' hot' : ''}">${n}</span>` : ''}</button>`).join('')}</div>
+      <div class="tabbar" role="tablist">${tabs.map(([v, l, n]) => `<button class="tabbar-btn${tab === v ? ' on' : ''}" data-act="rep-tab" data-v="${v}" role="tab" aria-selected="${tab === v}">${l}${n != null ? `<span class="n${v === 'crashes' && n ? ' hot' : ''}">${n}</span>` : ''}</button>`).join('')}</div>
       ${panel(d)}`;
   }
   const STAGE_SHORT = { start: 'Game', red4ext: 'RED4ext', cet: 'CET', scripts: 'redscript', tweaks: 'TweakXL', archives: 'Archives', end: 'Exit' };
@@ -1226,23 +1327,54 @@
     return `<div class="card launch-card"><div class="launch-hero ${hd[0]}"><span class="lh-ic">${ic(hd[1])}</span><div class="lh-txt"><b>Last launch: ${h(hd[2])}</b><span>Started ${h(fmtWhen(s.start))}${s.result !== 'running' ? ` &middot; ran ${h(fmtDur(s.seconds))}` : ''} &middot; game ${h(s.product || '?')}${s.red4ext ? ` &middot; RED4ext ${h(s.red4ext)}` : ''}</span></div>${c ? `<button class="btn sm" data-act="open-crash" data-id="${h(c.id)}">Crash details</button>` : ''}</div>
       <div class="card-body"><div class="row-head"><span class="sub-label">What loaded</span><button class="link-btn small" data-act="toggle-flowhelp">${help ? 'Hide the explanations' : 'Explain each step'}</button></div>
         ${help ? flowList(d) : pipeline(d)}
-        <div class="sub-label" style="margin-top:18px">What to do</div>${issuesHtml(d.issues || [])}</div></div>`;
+        <div class="row-head" style="margin-top:18px"><span class="sub-label">What to do</span>${!S.lib.updates && (d.issues || []).some(i => i.kind === 'mod') ? `<button class="link-btn small" data-act="lib-updates"${S.lib.checking ? ' disabled' : ''}>${S.lib.checking ? 'Checking for updates...' : 'Check these mods for updates'}</button>` : ''}</div>${issuesHtml(d.issues || [])}</div></div>`;
   }
   // launch stages as one compact row; the full list with explanations is one click away
   function pipeline(d) {
     const icon = { ok: 'check', warn: 'alert', bad: 'alert', run: 'play' };
     return `<ol class="pipe">${(d.stages || []).map((s, i) => `<li class="pipe-step ${h(s.status)}" title="${h(s.title)}&#10;${h(s.detail)}"><span class="ps-dot">${s.status === 'skip' ? i + 1 : ic(icon[s.status] || 'info')}</span><span class="ps-txt"><b>${h(STAGE_SHORT[s.key] || s.title)}</b><span>${h(String(s.detail || '').split(/ \(|, /)[0])}</span></span></li>`).join('')}</ol>`;
   }
+  // a problem the user marked as known: mod + message without its numbers; a changed message shows again
+  const issueKey = (mod, text) => (String(mod || '') + '|' + String(text || '').toLowerCase().replace(/\d+/g, '#').replace(/\s+/g, ' ').trim()).slice(0, 300);
+  const hiddenIssues = () => new Set(Array.isArray(prefs.hideIssues) ? prefs.hideIssues : []);
+  function setIssueHidden(key, on) {
+    const s = hiddenIssues();
+    if (on) s.add(key); else s.delete(key);
+    prefs.hideIssues = [...s].slice(-200); savePrefs();
+    renderReportsBody();
+    toast(on ? 'Hidden' : 'Shown again', on ? 'It comes back if the message changes. "Show them" at the end of the list brings it back now.' : '', 'ok', 4000);
+  }
   function issuesHtml(list) {
     if (!list.length) return '<p class="dim small" style="margin:0">Nothing to fix.</p>';
-    // problems get a box; notes (harmless warnings, all good) stay one quiet line
-    return list.map(i => {
+    const hid = hiddenIssues(), all = S.rep.showHidden;
+    const isHid = i => i.kind === 'mod' && hid.has(issueKey((i.mods || [])[0], i.msg || i.detail)), nHid = list.filter(isHid).length;
+    // problems get a box with what can be done about them; notes (harmless warnings, all good) stay one quiet line
+    const out = list.filter(i => all || !isHid(i)).map(i => {
       const k = { bad: 'bad', warn: 'warn', ok: 'ok', info: 'info' }[i.level] || 'neutral';
-      const acts = [i.crash ? `<button class="btn sm" data-act="open-crash" data-id="${h(i.crash)}">Crash details</button>` : '', i.level === 'bad' && i.crash ? `<button class="btn sm ghost" data-act="bisect-open">${ic('bug')}Find the problem mod</button>` : '',
-        ...(i.mods || []).slice(0, 6).map(n => `<button class="mchip sm" data-act="lib-open" data-name="${h(n)}">${h(n)}</button>`)].join('');
       if (k !== 'bad' && k !== 'warn') return `<div class="note-line ${k}">${ic(k === 'ok' ? 'check' : 'info')}<span><b>${h(i.title)}</b>${i.detail ? ` &middot; ${h(i.detail)}` : ''}</span></div>`;
-      return callout(k, `<b>${h(i.title)}</b>${i.detail ? `<br>${h(i.detail)}` : ''}${acts ? `<div class="issue-acts">${acts}</div>` : ''}`);
+      const links = (i.links || []).filter(l => l && l.mod).map(l => `<div class="issue-link"><button class="mchip sm" data-act="lib-open" data-name="${h(l.mod)}" title="Details and files">${h(l.mod)}</button><span>${h(l.why)}</span></div>`).join('');
+      return callout(k, `<b>${h(i.title)}</b>${i.detail ? `<br>${h(i.detail)}` : ''}${links}<div class="issue-acts">${issueActs(i, isHid(i))}</div>`);
     }).join('');
+    return out + (nHid ? `<div class="note-line">${ic('eye')}<span>${plural(nHid, 'hidden problem')} &middot; <button class="link-btn small" data-act="rep-hidden">${all ? 'Hide them again' : 'Show them'}</button></span></div>` : '');
+  }
+  // what can be done about one problem: update, turn off, read the log, see the file, read Nexus, or hide it
+  function issueActs(i, hidden) {
+    const acts = [], name = i.kind === 'mod' ? (i.mods || [])[0] : '', m = name ? findItem(name) : null;
+    if (i.crash) acts.push(`<button class="btn sm" data-act="open-crash" data-id="${h(i.crash)}">Crash details</button>`);
+    if (i.level === 'bad' && i.crash) acts.push(`<button class="btn sm ghost" data-act="bisect-open">${ic('bug')}Find the problem mod</button>`);
+    if (m) {
+      const nx = String(m.source || '').match(/nexus:(\d+)/), up = S.lib.updates && S.lib.updates[m.name];
+      if (up && nx) acts.push(`<button class="btn sm primary" data-act="get" data-mod="${nx[1]}" data-file="${+up.fileId}" data-name="${h(m.name)}" title="Opens the new file on Nexus; click Slow download there">${ic('dl')}Update to v${h(String(up.version).replace(/^v/i, ''))}</button>`);
+      if (m.on && !m.fw) acts.push(`<button class="btn sm" data-act="issue-off" data-name="${h(m.name)}" title="Its files are set aside, not deleted. Turn it back on in the Library at any time.">Turn off</button>`);
+      else if (!m.on) acts.push('<span class="pill muted">Off now</span>');
+    }
+    if (i.log) acts.push(`<button class="btn sm ghost" data-act="open-log" data-path="${h(i.log)}" title="Open ${h(i.log)}">${ic('file')}Open log</button>`);
+    if (i.file) acts.push(`<button class="btn sm ghost" data-act="reveal" data-path="${h(i.file)}" title="Show ${h(i.file)} in its folder">${ic('folder')}Show file</button>`);
+    if (m && m.modId) acts.push(`<button class="btn sm ghost" data-act="open-url" data-url="${NEXUS}/mods/${+m.modId}?tab=posts" title="What other players report about it">${ic('ext')}Nexus posts</button>`);
+    if (m) acts.push(`<button class="btn sm ghost" data-act="lib-open" data-name="${h(m.name)}">${ic('info')}Details</button>`);
+    else acts.push(...(i.mods || []).slice(0, 6).map(n => `<button class="mchip sm" data-act="lib-open" data-name="${h(n)}">${h(n)}</button>`));
+    if (i.kind === 'mod') acts.push(`<span class="spacer"></span><button class="link-btn small" data-act="issue-hide" data-key="${h(issueKey(name, i.msg || i.detail))}" data-on="${hidden ? '0' : '1'}" title="${hidden ? 'Count it as a problem again' : 'You know about it: hide it until the message changes'}">${hidden ? 'Show again' : 'Hide'}</button>`);
+    return acts.join('');
   }
   const FLOW_HELP = {
     start: 'Steam starts Cyberpunk2077.exe. Loader files in bin\\x64 (winmm.dll, version.dll) make Windows load the frameworks with it.',
@@ -1258,14 +1390,16 @@
     return `<ol class="flow">${(d.stages || []).map((s, i) => `<li class="flow-step ${h(s.status)}"><span class="fs-dot">${s.status === 'skip' ? i + 1 : ic(icon[s.status] || 'info')}</span><div class="fs-txt"><b>${h(s.title)}</b><span>${h(s.detail)}</span>${FLOW_HELP[s.key] ? `<em>${h(FLOW_HELP[s.key])}</em>` : ''}</div></li>`).join('')}</ol>`;
   }
   function launchModsCard(d) {
-    const mods = d.mods || [], f = S.game.mods;
-    const bad = m => m.status === 'error' || m.status === 'warn';
+    const mods = d.mods || [], f = S.rep.mods, hid = hiddenIssues();
+    // a mod whose every problem was hidden on this page counts as known, not as one to check
+    const stOf = m => (m.status === 'error' || m.status === 'warn') && !(m.notes || []).some(nt => (nt.level === 'error' || nt.level === 'warn') && !hid.has(issueKey(m.name, nt.text))) ? 'known' : m.status;
+    const bad = m => ['error', 'warn'].includes(stOf(m));
     const n = { problems: mods.filter(bad).length, new: mods.filter(m => m.status === 'new').length, all: mods.length };
     const list = f === 'all' ? mods : f === 'new' ? mods.filter(m => m.status === 'new') : mods.filter(bad);
-    const st = { error: ['bad', 'alert', 'Problem'], warn: ['warn', 'alert', 'Worth a check'], new: ['info', 'info', 'Not tested yet'], ok: ['ok', 'check', 'Loaded'], assets: ['muted', 'box', 'Assets (the game loads them without logging)'] };
-    return `<div class="card"><div class="card-head"><span class="dim small">How each mod did when the game last started</span><div class="seg">${[['problems', 'To check', n.problems], ['new', 'Not tested', n.new], ['all', 'All', n.all]].map(([v, l, c]) => `<button data-act="game-mods" data-v="${v}" class="${f === v ? 'on' : ''}">${l} <span class="n">${c}</span></button>`).join('')}</div></div>
+    const st = { error: ['bad', 'alert', 'Problem'], warn: ['warn', 'alert', 'Worth a check'], known: ['muted', 'eye', 'You hid its problem on this page'], new: ['info', 'info', 'Not tested yet'], ok: ['ok', 'check', 'Loaded'], assets: ['muted', 'box', 'Assets (the game loads them without logging)'] };
+    return `<div class="card"><div class="card-head"><span class="dim small">How each mod did when the game last started</span><div class="seg">${[['problems', 'To check', n.problems], ['new', 'Not tested', n.new], ['all', 'All', n.all]].map(([v, l, c]) => `<button data-act="rep-mods" data-v="${v}" class="${f === v ? 'on' : ''}">${l} <span class="n">${c}</span></button>`).join('')}</div></div>
       <div class="card-body flush">${list.length ? `<div class="list">${list.map(m => {
-      const x = st[m.status] || st.assets, notes = m.notes || [], first = notes.find(nt => nt.level === 'error' || nt.level === 'warn') || notes[0];
+      const x = st[stOf(m)] || st.assets, notes = m.notes || [], first = notes.find(nt => nt.level === 'error' || nt.level === 'warn') || notes[0];
       return `<div class="li click" data-act="lib-open" data-name="${h(m.name)}" tabindex="0" title="Show this mod"><span class="st-ic ${x[0]}" title="${h(x[2])}">${ic(x[1])}</span><div class="li-main"><div class="li-title"><span class="t">${h(m.name)}</span><span class="kchips">${kindChips(m.kinds, 3)}</span></div>${first ? `<div class="li-sub"><span>${h(first.text)}${first.note ? ' ' + h(first.note) : ''}</span></div>` : ''}</div><span class="li-go">${ic('fwd')}</span></div>`;
     }).join('')}</div>` : `<div class="empty" style="padding:24px 16px">${f === 'problems' ? 'No mod had a problem on the last launch.' : f === 'new' ? 'Every mod was part of the last launch.' : 'No mods.'}</div>`}</div></div>`;
   }
@@ -1283,9 +1417,40 @@
       return `<div class="li slim${x.crash ? ' click' : ''}"${x.crash ? ` data-act="open-crash" data-id="${h(x.crash)}" tabindex="0"` : ''}><span class="dot ${resultDot(x.result)}"></span><span class="t">${h(fmtWhen(x.start))}</span><span class="dim small">${h(fmtDur(x.seconds))} &middot; ${plural(x.plugins || 0, 'plugin')}</span><span class="spacer"></span><span class="stag s-${s[0]}">${h(s[1])}</span></div>`;
     }).join('')}</div>` : '<div class="empty" style="padding:24px 16px">No launches recorded yet.</div>'}</div></div>`;
   }
-  function foldersCard() {
-    return `<div class="card"><div class="card-head"><span class="dim small">Each one opens in your file manager</span></div><div class="card-body"><div class="folder-grid">${FOLDERS.map(([k, l, d]) => `<button class="folder-btn" data-act="open-loc" data-loc="${k}" title="Open ${h(l)}">${ic('folder')}<span><b>${h(l)}</b><em>${h(d)}</em></span></button>`).join('')}</div>
-      <div class="toolbar folder-foot"><button class="btn sm" data-act="steam" data-what="validate" title="Steam checks the game's own files and repairs damaged ones">${ic('shield')}Verify game files</button><button class="btn sm ghost" data-act="steam" data-what="page">${ic('ext')}Open in Steam</button><span class="spacer"></span><button class="btn sm ghost" data-act="settings-at" data-k="launch">${ic('gear')}Launch settings</button></div></div></div>`;
+  // ---------- game: play, launch options, saves and backups, game folders ----------
+  function pageGame(el) {
+    const st = S.st, g = st.game, s = st.settings, lt = launchSt(), L = S.launch, left = gameProcs().filter(x => x !== 'Cyberpunk2077');
+    const state = g.missing ? ['bad', 'Not found in its folder'] : g.running ? ['run', 'Running'] : left.length ? ['warn', 'Closing'] : g.updatePending ? ['warn', 'Steam has an update pending'] : ['ok', 'Ready to play'];
+    const last = lt && lt.start ? `<button class="gm-last" data-act="go" data-page="reports" title="Open the report of that launch"><span class="dot ${resultDot(lt.result)}"></span><span>Last launch ${h(fmtWhen(lt.start))}: ${h(resultWord(lt.result))}</span>${ic('fwd')}</button>` : '<span class="dim small">No launch recorded yet.</span>';
+    el.innerHTML = `
+      <header class="page-head"><div class="ph-top">
+        <div><h1>Game</h1><p class="sub">Play, launch options, saves and backups, and the game folders.</p></div>
+        <div class="ph-actions">${killBtn(true)}<button class="btn primary" data-act="play"${g.running || g.missing ? ' disabled' : ''}>${ic('play')}${g.running ? 'Running' : 'Play'}</button><button class="btn icon-only" data-act="play-menu" title="Other ways to launch" aria-label="Other ways to launch">${ic('down')}</button></div>
+      </div></header>
+      <div class="page-body gm">
+        <div class="card gm-hero"><div class="gm-top"><span class="gm-ic ${state[0]}">${ic('game')}</span>
+          <div class="gm-txt"><b>Cyberpunk 2077${g.version ? ' ' + h(g.version) : ''}</b><span><span class="dot ${state[0] === 'ok' ? 'ok' : state[0]}"></span>${h(state[1])}${g.build ? ` &middot; build ${h(g.build)}` : ''}</span><span class="mono-path">${h(st.paths.game)}</span></div>
+          <div class="gm-acts"><button class="btn sm" data-act="vanilla-start"${g.running || st.vanilla ? ' disabled' : ''} title="Starts the game once with every mod set aside; they come back when it closes">${ic('play')}Play without mods</button><button class="btn sm ghost" data-act="steam" data-what="validate" title="Steam checks the game's own files and repairs damaged ones">${ic('shield')}Verify game files</button><button class="btn sm ghost" data-act="steam" data-what="page">${ic('ext')}Open in Steam</button></div></div>
+          <div class="gm-foot">${last}</div></div>
+        <div class="gm-grid">
+          <section class="card" id="g-launch"><div class="card-head"><h3>${ic('play')} Launch</h3></div><div class="card-body">${launchSettingsHtml(s, L.data && L.data.steam)}</div></section>
+          <section class="card" id="g-backups"><div class="card-head"><h3>${ic('history')} Saves and backups</h3></div><div class="card-body">${backupSettingsHtml(s)}</div></section>
+        </div>
+        <section class="card" id="g-folders"><div class="card-head"><h3>${ic('folder')} Folders</h3><span class="dim small">Each one opens in your file manager</span></div><div class="card-body"><div class="folder-grid">${FOLDERS.map(([k, l, d]) => `<button class="folder-btn" data-act="open-loc" data-loc="${k}" title="Open ${h(l)}">${ic('folder')}<span><b>${h(l)}</b><em>${h(d)}</em></span></button>`).join('')}</div></div></section>
+      </div>`;
+    if (!L.data && !L.loading && !L.err) loadLaunch(false);
+  }
+  function backupSettingsHtml(s) {
+    return srow('Automatic restore points', 'Before installs, removals and switches (one per batch), and after a launch that closes normally. Going back switches mods off or on and reinstalls older versions from Downloads.', ssw('autoRestore', s.autoRestore !== false, 'Automatic restore points'))
+      + srow('Copy saves before changed launches', 'When the mods changed since the last copy, cpmods copies your newest saves before the game starts. Copies only: saves are never moved.', ssw('saveBackup', s.saveBackup !== false, 'Copy saves before changed launches'))
+      + srow('Save copies to keep', 'Older copies are deleted from cpmods\' backup folder.', `<select data-setsel="saveKeep" aria-label="Save copies to keep">${opt([3, 5, 10, 20].map(n => [String(n), String(n)]), String(s.saveKeep || 5))}</select>`)
+      + `<div class="toolbar sx-foot"><button class="btn sm" data-act="tool" data-tool="backups">${ic('history')}Open backups</button><button class="btn sm ghost" data-act="bk-point">${ic('plus')}Make a restore point now</button><button class="btn sm ghost" data-act="bk-saves-now">${ic('save')}Copy my saves now</button></div>`;
+  }
+  // the Game page opened at one of its cards (from the play menu, Settings...)
+  function openGameAt(k) {
+    go('game');
+    const el = $('#g-' + k);
+    if (el) el.scrollIntoView({ block: 'start' });
   }
   function launchSettingsHtml(s, so) {
     return `<div class="setting"><div class="setting-text"><b>Launch the game</b><span>Through Steam is recommended. Directly starts Cyberpunk2077.exe (Steam still opens in the background).</span></div><select data-setsel="launchMode" aria-label="Launch mode">${opt([['steam', 'Through Steam'], ['direct', 'Directly']], s.launchMode || 'steam')}</select></div>
@@ -1347,10 +1512,11 @@
     const sel = (key, label, list) => `<select data-perf="${key}" aria-label="${h(label)}">${opt(list, P[key])}</select>`;
     const sw = (key, label) => `<label class="switch"><input type="checkbox" data-perf="${key}"${P[key] ? ' checked' : ''} aria-label="${h(label)}"><span></span></label>`;
     const row = (title, text, est, ctl) => `<div class="setting"><div class="setting-text"><b>${title}</b><span>${text}</span>${info && est ? `<em class="perf-est">${est}</em>` : ''}</div>${ctl}</div>`;
-    return `<div class="perf-now" id="perf-now">${perfNowHtml()}</div>
+    return `<div class="sub-label">Memory</div><div class="perf-now" id="perf-now">${perfNowHtml()}</div>
       <div class="toolbar perf-tools"><button class="btn sm" data-act="perf-free">Free memory now</button><button class="btn sm ghost" data-act="perf-refresh">Measure again</button><span class="spacer"></span><button class="link-btn small" data-act="perf-info" aria-pressed="${info}">${info ? 'Hide memory numbers' : 'Show memory numbers'}</button></div>
+      <div class="sub-label">Disk space</div><div id="disk-now">${diskHtml()}</div>
       <div class="sub-label">While the game runs</div>
-      ${row('Lighter while the game runs', 'Game page only, no pictures, slower refresh, lower priority.', 'Measured: window 167 to 43 MB, server 110 to 26 MB (Task Manager). Minimizing cpmods frees memory the same way.', sw('lean', 'Lighter while the game runs'))}
+      ${row('Lighter while the game runs', 'Reports page only, no pictures, slower refresh, lower priority.', 'Measured: window 167 to 43 MB, server 110 to 26 MB (Task Manager). Minimizing cpmods frees memory the same way.', sw('lean', 'Lighter while the game runs'))}
       <div class="sub-label">Pictures</div>
       <div class="set-grid">
       ${row('Tile pictures', 'On Discover and Collections.', `About 20 on screen: large ${fmtMb(20 * PIC_MB.large)}, small ${fmtMb(20 * PIC_MB.small)}.`, sel('pics', 'Tile pictures', [['large', 'Large'], ['small', 'Small'], ['off', 'Off']]))}
@@ -1367,14 +1533,48 @@
       </div>`;
   }
   const GPU_NOTE = 'Measured off: 28 MB less in use, 150 MB less reserved, no graphics memory; scrolling uses a bit more CPU.';
+  // disk space: mods in the game folder, cpmods' own data, free space, and what a cleanup can delete safely
+  function diskHtml() {
+    const d = S.disk;
+    if (!d) return '<div class="perf-now"><span class="spin"></span><span>Measuring...</span></div>';
+    if (d.error) return `<div class="err">${h(d.error)}</div>`;
+    const x = d.data, parts = [['Downloads', x.downloads, 'Archives kept so mods can be turned off and on, updated back or reinstalled'], ['Save copies', x.saves, `${plural(d.saveCopies, 'copy', 'copies')} of your saves`], ['App data', x.app, 'Window cache, settings, logs'],
+      ['Replaced game files', x.backup, 'Originals of game files that mods replaced; they go back when you remove the mod'], ['Mod settings backups', x.settings, ''], ['Mods set aside', x.parked, 'Files of turned-off mods that were installed before cpmods'], ['Temporary files', x.tmp, 'Left by interrupted installs']].filter(p => p[1].bytes > 0);
+    const total = parts.reduce((s, p) => s + p[1].bytes, 0), top = Math.max(1, ...parts.map(p => p[1].bytes));
+    const bar = (b, max) => `<span class="du-bar"><i style="width:${Math.max(1.5, b / max * 100).toFixed(1)}%"></i></span>`;
+    const sp = d.spare, free = sp.free.length + (x.tmp.bytes ? 1 : 0);
+    const drives = (d.drives || []).map(v => `<span>${h(v.name)} <b>${fmtSize(v.free)}</b> <span class="dim">free of ${fmtSize(v.total)}${v.game && v.cpmods ? ' (game and cpmods)' : v.game ? ' (game)' : ' (cpmods)'}</span></span>`).join('');
+    return `<div class="du">
+        <div class="du-head"><span><b>${fmtSize(d.mods.bytes)}</b> in the game folder for ${plural(d.mods.count, 'mod')}</span><span class="dim small">Largest: ${d.mods.top.filter(m => m.bytes).map(m => `${h(m.name)} ${fmtSize(m.bytes)}`).join(', ') || 'none'}</span></div>
+        <div class="du-head"><span><b>${fmtSize(total)}</b> used by cpmods itself</span></div>
+        <div class="du-list">${parts.map(([l, u, t]) => `<div class="du-row"${t ? ` title="${h(t)}"` : ''}><span class="du-l">${h(l)}</span>${bar(u.bytes, top)}<span class="du-n">${fmtSize(u.bytes)}</span></div>`).join('')}</div>
+        <div class="perf-now du-drives">${drives}</div>
+        <div class="du-clean">${free || sp.old.length ? `<span>${sp.free.length ? `<b>${plural(sp.free.length, 'download')}</b> (${fmtSize(sp.freeBytes)}) no mod uses any more.` : 'Every download is used by a mod.'}${sp.old.length ? ` ${plural(sp.old.length, 'older version')} (${fmtSize(sp.oldBytes)}) only restore points use.` : ''}</span><button class="btn sm" data-act="disk-clean">Free space...</button>` : '<span class="dim small">Nothing to clean up: every download belongs to a mod.</span>'}<button class="btn sm ghost" data-act="disk-refresh">Measure again</button></div>
+      </div>`;
+  }
+  async function loadDisk() {
+    try { S.disk = await api('/api/storage'); } catch (e) { S.disk = { error: e.message }; }
+    const el = $('#disk-now');
+    if (el) el.innerHTML = diskHtml();
+  }
+  async function diskClean() {
+    const sp = S.disk && S.disk.spare;
+    if (!sp) return;
+    const list = sp.free.slice(0, 8).map(f => `<li>${h(f.file)} <span class="dim">${fmtSize(f.size)}</span></li>`).join('') + (sp.free.length > 8 ? `<li class="dim">and ${sp.free.length - 8} more</li>` : '');
+    const body = `${sp.free.length ? `These downloads are not used by any mod (installed, off or waiting) or restore point:<ul class="ask-list">${list}</ul>` : 'No download is unused right now.'}
+      ${sp.old.length ? `<label class="check-row"><input type="checkbox" class="check" data-pick="old"> <span>Also delete ${plural(sp.old.length, 'older version')} (${fmtSize(sp.oldBytes)}) that only restore points use. Going back to those points then cannot bring those versions back.</span></label>` : ''}
+      <p class="dim small">Temporary files left by interrupted installs go too. Mods, saves and backups are not touched.</p>`;
+    const r = await choose({ title: 'Free disk space?', body, options: [{ v: 'go', label: 'Delete', kind: 'danger' }] });
+    if (!r) return;
+    try { await api('/api/storage', { op: 'clean', old: r.picked.includes('old') }); toast('Freeing disk space', 'Progress shows in the bar at the bottom.', '', 3000); }
+    catch (e) { toast('Could not clean up', e.message, 'bad', 8000); }
+  }
 
   // ---------- settings: one collapsible section per topic; the closed header still shows the current values ----------
   const SECTIONS = [
     { k: 'downloads', t: 'Downloads and installs', i: 'downloads' },
-    { k: 'launch', t: 'Game launch', i: 'play' },
-    { k: 'safety', t: 'Backups and restore points', i: 'history' },
     { k: 'look', t: 'Appearance', i: 'palette' },
-    { k: 'perf', t: 'Performance', i: 'gauge' },
+    { k: 'perf', t: 'Performance and disk space', i: 'gauge' },
     { k: 'nexus', t: 'Nexus account', i: 'key2' },
     { k: 'patch', t: 'Patch compatibility', i: 'refresh' },
     { k: 'share', t: 'Share with friends', i: 'share' },
@@ -1384,13 +1584,11 @@
   const srow = (title, text, ctl) => `<div class="setting"><div class="setting-text"><b>${title}</b><span>${text}</span></div>${ctl}</div>`;
   const ssw = (key, on, label) => `<label class="switch"><input type="checkbox" data-setting="${key}"${on ? ' checked' : ''} aria-label="${h(label)}"><span></span></label>`;
   function sectionSummary(k) {
-    const st = S.st, s = st.settings, P = perf(), th = THEMES.find(x => x.id === (prefs.theme || 'yellow'));
+    const st = S.st, s = st.settings, P = perf(), th = THEMES.find(x => x.id === themeId()), bg = BGS.find(x => x.id === bgId());
     const parts = {
       downloads: [s.autoInstall ? 'Installs when downloaded' : 'Installs when you choose', s.askOverwrite !== false ? 'asks when two mods share a file' : 'last installed mod wins shared files', s.browser ? 'links in ' + browserName() : 'links in your default browser'],
-      launch: [s.launchMode === 'direct' ? 'Starts Cyberpunk2077.exe' : 'Through Steam', s.reportOnExit !== false ? 'report when it closes' : 'no report', s.warnRisk !== false ? 'warns about risky conflicts' : ''],
-      safety: [s.autoRestore !== false ? 'Automatic restore points' : 'Restore points off', s.saveBackup !== false ? `saves copied before changed launches (keeps ${s.saveKeep || 5})` : 'saves not copied'],
-      look: [th ? th.name : 'Yellow', P.fx ? 'effects on' : 'effects off'],
-      perf: [P.lean ? 'Lighter while playing' : 'Same while playing', `${P.pics} tile pictures`, P.window === 'browser' ? 'browser window' : 'built-in window'],
+      look: [th.name, bg.id === 'match' ? 'matching background' : bg.name.toLowerCase() + ' background', P.fx ? 'effects on' : 'effects off'],
+      perf: [P.lean ? 'Lighter while playing' : 'Same while playing', `${P.pics} tile pictures`, P.window === 'browser' ? 'browser window' : 'built-in window', S.disk && S.disk.mods ? fmtSize(S.disk.mods.bytes) + ' of mods' : ''],
       nexus: [st.key ? 'API key set' : 'API key missing', st.handler ? 'download links work' : 'download links not set up'],
       patch: [`"Updated for ${s.patchLabel}" means updated since ${fmtDate(s.patchDate)}`],
       share: ['App zip, your mod list, your mod settings'],
@@ -1404,11 +1602,6 @@
       + srow('Ask when two mods have the same file', 'On: you choose (combine both, use the new copy, or keep the old one). Off: no question. Both mods install, the one installed last is used, and the other\'s copy is kept underneath: it comes back if you remove the newer mod.', ssw('askOverwrite', s.askOverwrite !== false, 'Ask when two mods have the same file'))
       + srow('Continue the queue', 'Open the next queued download page by itself.', ssw('autoNext', s.autoNext, 'Continue the queue'))
       + srow('Open links in', 'Pages open in this browser and come to the front.', `<select id="s-browser" aria-label="Open links in">${opt([['', 'Windows default']].concat((st.browsers || []).map(b => [b.path, b.name])), s.browser || '')}</select>`);
-    if (k === 'launch') return launchSettingsHtml(s, S.launch.data && S.launch.data.steam);
-    if (k === 'safety') return srow('Automatic restore points', 'Before installs, removals and switches (one per batch), and after a launch that closes normally. Going back switches mods off or on and reinstalls older versions from Downloads.', ssw('autoRestore', s.autoRestore !== false, 'Automatic restore points'))
-      + srow('Copy saves before changed launches', 'When the mods changed since the last copy, cpmods copies your newest saves before the game starts. Copies only: saves are never moved.', ssw('saveBackup', s.saveBackup !== false, 'Copy saves before changed launches'))
-      + srow('Save copies to keep', 'Older copies are deleted from cpmods\' backup folder.', `<select data-setsel="saveKeep" aria-label="Save copies to keep">${opt([3, 5, 10, 20].map(n => [String(n), String(n)]), String(s.saveKeep || 5))}</select>`)
-      + `<div class="toolbar sx-foot"><button class="btn sm" data-act="tool" data-tool="backups">${ic('history')}Open Backups</button><button class="btn sm ghost" data-act="bk-point">${ic('plus')}Make a restore point now</button></div>`;
     if (k === 'look') return appearanceHtml();
     if (k === 'perf') return perfHtml();
     if (k === 'nexus') return srow('API key', st.key ? 'Stored encrypted for your Windows account.' : 'Downloads need it. A free Nexus account is enough.', `<span class="pill ${st.key ? 'ok' : 'warn'}">${st.key ? 'Set' : 'Missing'}</span>`)
@@ -1422,7 +1615,6 @@
     return srow('Only show missing requirements', 'In a mod\'s details, hide requirements you already have. A "Show" link there brings them back.', `<label class="switch"><input type="checkbox" data-pref="reqMissingOnly"${prefs.reqMissingOnly ? ' checked' : ''} aria-label="Only show missing requirements"><span></span></label>`)
       + srow('Explain game folders', 'In file trees and the folder map, describe what each folder holds.', `<label class="switch"><input type="checkbox" data-pref="explain"${prefs.explain === true ? ' checked' : ''} aria-label="Explain game folders"><span></span></label>`)
       + srow('Compact sidebar', 'Show only icons on the left (Ctrl+B).', `<label class="switch"><input type="checkbox" data-pref="sideMin"${prefs.sideMin ? ' checked' : ''} aria-label="Compact sidebar"><span></span></label>`)
-      + srow('Folders', `Game: ${h(st.paths.game)}<br>Downloads: ${h(st.paths.downloads)}`, `<span class="btn-pair"><button class="btn sm" data-act="sys" data-op="folder">${ic('folder')}Game</button><button class="btn sm" data-act="sys" data-op="downloads">${ic('folder')}Downloads</button></span>`)
       + srow('Activity log', 'What cpmods did, newest last.', '<button class="btn sm" data-act="tool" data-tool="log">Show log</button>')
       + srow('Quit cpmods', 'Running downloads finish first.', '<button class="btn sm danger" data-act="sys" data-op="quit">Quit</button>');
   }
@@ -1431,17 +1623,19 @@
     el.innerHTML = `
       <header class="page-head"><div class="ph-top"><div><h1>Settings</h1><p class="sub">Changes save as soon as you make them. Click a section to open it.</p></div>
         <div class="ph-actions"><button class="btn sm ghost" data-act="sx-all">${all ? 'Collapse all' : 'Expand all'}</button></div></div></header>
-      <div class="page-body"><div class="sx-list">${SECTIONS.map(x => {
+      <div class="page-body"><div class="sx-list"><div class="sx-note">${ic('game')}<span>Launch options, saves and backups, and the game folders are on the <button class="link-btn" data-act="go" data-page="game">Game page</button>.</span></div>${SECTIONS.map(x => {
       const on = open.has(x.k);
       return `<section class="sx${on ? ' open' : ''}" id="sx-${x.k}"><button class="sx-head" data-act="sx" data-k="${x.k}" aria-expanded="${on}" aria-controls="sxb-${x.k}"><span class="sx-ic">${ic(x.i)}</span><span class="sx-t"><b>${h(x.t)}</b><span>${h(sectionSummary(x.k))}</span></span><span class="sx-chev">${ic('down')}</span></button>
         <div class="sx-body" id="sxb-${x.k}"${on ? '' : ' hidden'}>${on ? sectionBody(x.k) : ''}</div></section>`;
     }).join('')}</div></div>`;
-    // live memory numbers only while their section is open (one WMI query each time)
-    if (open.has('perf')) loadPerfNow();
+    // live memory numbers only while their section is open (one WMI query each time); disk space once per opening
+    if (open.has('perf')) { loadPerfNow(); if (!S.disk) loadDisk(); }
   }
   function toggleSection(k, force) {
     const open = setOpen(), on = force != null ? force : !open.has(k);
     if (on) open.add(k); else open.delete(k);
+    // disk space is measured again each time its section opens
+    if (on && k === 'perf') S.disk = null;
     prefs.setOpen = [...open]; savePrefs();
     if (S.page === 'settings') pageSettings($('#page'));
   }
@@ -2085,7 +2279,7 @@
   function lastGoodStart() { const d = S.launch.data, g = d && (d.history || []).find(x => x.result === 'clean'); return g ? toDate(g.start) : null; }
   function bisectPane(p) {
     const bs = S.st.bisect;
-    if (bs && bs.active) return paneHead('Find the problem mod') + `<div class="pane-body"><h2>Troubleshooting is running</h2><p class="muted">Answer on the Game page after each launch.</p><button class="btn primary" data-act="go" data-page="game">Go to the Game page</button></div>`;
+    if (bs && bs.active) return paneHead('Find the problem mod') + `<div class="pane-body"><h2>Troubleshooting is running</h2><p class="muted">Answer on the Reports page after each launch.</p><button class="btn primary" data-act="go" data-page="reports">Go to the Reports page</button></div>`;
     const cands = bisectCandidates(), good = lastGoodStart();
     const changed = good ? cands.filter(m => { const t = toDate(m.installed); return t && t > good; }) : [];
     if (!p.sel) { p.sel = {}; (changed.length ? changed : cands).forEach(m => { p.sel[m.name] = true; }); p.scope = changed.length ? 'changed' : 'all'; }
@@ -2218,8 +2412,8 @@
       items.push('-');
     }
     if (gameProcs().length) items.push({ label: 'Force close the game', act: 'kill', icon: 'stop', danger: true }, '-');
-    FOLDERS.forEach(([k, l]) => items.push({ label: l, act: 'open-loc', data: { loc: k }, icon: 'folder' }));
-    items.push('-', { label: 'Last launch report', act: 'go', data: { page: 'game' }, icon: 'history' }, { label: 'Find the problem mod', act: 'bisect-open', icon: 'bug' }, { label: 'Copy my saves now', act: 'bk-saves-now', icon: 'save' }, { label: 'Backups and restore points', act: 'tool', data: { tool: 'backups' }, icon: 'history' }, { label: 'Verify game files (Steam)', act: 'steam', data: { what: 'validate' }, icon: 'shield' }, { label: 'Launch settings', act: 'settings-at', data: { k: 'launch' }, icon: 'gear' });
+    items.push({ label: 'Game folders', act: 'game-at', data: { k: 'folders' }, icon: 'folder' });
+    items.push('-', { label: 'Last launch report', act: 'go', data: { page: 'reports' }, icon: 'reports' }, { label: 'Find the problem mod', act: 'bisect-open', icon: 'bug' }, { label: 'Copy my saves now', act: 'bk-saves-now', icon: 'save' }, { label: 'Backups and restore points', act: 'tool', data: { tool: 'backups' }, icon: 'history' }, { label: 'Verify game files (Steam)', act: 'steam', data: { what: 'validate' }, icon: 'shield' }, { label: 'Launch settings', act: 'game-at', data: { k: 'launch' }, icon: 'gear' });
     return items;
   }
   // force-closes the game, or what is left of it (crash reporter, launcher) when Steam still says "Running"
@@ -2253,8 +2447,8 @@
     const names = bisectCandidates().filter(m => p.sel && p.sel[m.name]).map(m => m.name);
     if (!names.length) return;
     if (S.st.game.running) { toast('Close the game first', 'Mods cannot be switched while it runs.', 'warn', 5000); return; }
-    if (!await ask({ title: `Turn off ${plural(names.length, 'mod')}?`, body: 'Their files are set aside, not deleted. Then launch the game and answer on the Game page. You can stop at any time: everything is turned back on.', ok: 'Start' })) return;
-    try { await api('/api/bisect', { op: 'start', names }); toast('Troubleshooting started', 'Turning the mods off. Launch the game when it is done.', 'ok', 6000); await refreshState(); go('game'); }
+    if (!await ask({ title: `Turn off ${plural(names.length, 'mod')}?`, body: 'Their files are set aside, not deleted. Then launch the game and answer on the Reports page. You can stop at any time: everything is turned back on.', ok: 'Start' })) return;
+    try { await api('/api/bisect', { op: 'start', names }); toast('Troubleshooting started', 'Turning the mods off. Launch the game when it is done.', 'ok', 6000); await refreshState(); go('reports'); }
     catch (e) { toast('Could not start', e.message, 'bad', 10000); }
   }
   async function bisectResult(ok) {
@@ -2284,12 +2478,12 @@
     await new Promise(r => setTimeout(r, 2500));
     await loadLaunch(true);
     const d = S.launch.data, s = d && d.session, bs = S.st && S.st.bisect;
-    if (bs && bs.active && bs.phase !== 'done') { toast('Game closed', 'Tell cpmods whether the problem happened.', 'warn', 20000, { label: 'Answer', act: 'go', data: { page: 'game' } }); return; }
+    if (bs && bs.active && bs.phase !== 'done') { toast('Game closed', 'Tell cpmods whether the problem happened.', 'warn', 20000, { label: 'Answer', act: 'go', data: { page: 'reports' } }); return; }
     if (!s || (S.st.settings && S.st.settings.reportOnExit === false) || Date.now() - S.killedAt < 30000) return;
     const n = (d.issues || []).filter(i => i.level === 'bad' || i.level === 'warn').length;
     const title = s.result === 'crash' ? 'The game crashed' : s.result === 'clean' ? 'Game closed normally' : 'The game stopped';
     const msg = s.result === 'crash' && s.crash ? `${s.crash.when}${s.crash.moduleMod ? ', inside ' + s.crash.moduleMod : ''}.` : n ? `${plural(n, 'thing')} to check in the launch report.` : 'Every mod loaded without errors.';
-    toast(title, msg, s.result === 'crash' ? 'bad' : n ? 'warn' : 'ok', 15000, { label: 'See report', act: 'go', data: { page: 'game' } });
+    toast(title, msg, s.result === 'crash' ? 'bad' : n ? 'warn' : 'ok', 15000, { label: 'See report', act: 'go', data: { page: 'reports' } });
   }
   async function exportModList() {
     try {
@@ -2557,7 +2751,7 @@
       if (i >= 0) openLightbox(items, i, paneTitle(p)); else openLightbox([{ u, kind: 'img' }], 0, p ? paneTitle(p) : '');
     },
     'reqs-all': () => { const p = S.pane; if (p) { p.allReqs = !p.allReqs; renderPane(); } },
-    'cw-preset': t => { S.cw = cwOf(t.dataset.v); setCustom(t.dataset.v, true); },
+    'pick-preset': t => { const k = t.dataset.k; S[k] = cwOf(t.dataset.v, k); PICKERS[k].set(t.dataset.v, true); },
     'lb-close': () => closeLightbox(),
     'lb-step': t => lbStep(+t.dataset.v),
     'lb-noop': () => { },
@@ -2579,8 +2773,19 @@
     'local-files': t => { const p = S.pane; if (!p) return; const fs = p.filesShown = p.filesShown || {}, n = t.dataset.name, cur = n in fs ? fs[n] : p.kind === 'files'; fs[n] = !cur; renderPane(); },
     'kill': () => killGame(),
     'key-save': () => saveKey(),
-    'game-tab': t => { S.game.tab = t.dataset.v; renderGameBody(); },
-    'toggle-flowhelp': () => { prefs.flowHelp = !prefs.flowHelp; savePrefs(); renderGameBody(); },
+    'rep-tab': t => { S.rep.tab = t.dataset.v; renderReportsBody(); },
+    'toggle-flowhelp': () => { prefs.flowHelp = !prefs.flowHelp; savePrefs(); renderReportsBody(); },
+    'rep-hidden': () => { S.rep.showHidden = !S.rep.showHidden; renderReportsBody(); },
+    'issue-hide': t => setIssueHidden(t.dataset.key, t.dataset.on === '1'),
+    'issue-off': async t => {
+      const n = t.dataset.name;
+      if (!await ask({ title: `Turn off ${n}?`, body: 'Its files are set aside, not deleted, and the game starts without it. Turn it back on in the Library at any time.<br><br>This report changes after your next launch.', ok: 'Turn off' })) return;
+      action({ op: 'disable', name: n }, `Turning off ${n}`);
+    },
+    'open-log': t => sysQuiet({ op: 'openFile', path: t.dataset.path }, 'Could not open the log'),
+    'game-at': t => openGameAt(t.dataset.k),
+    'disk-clean': () => diskClean(),
+    'disk-refresh': () => { S.disk = null; const el = $('#disk-now'); if (el) el.innerHTML = diskHtml(); loadDisk(); },
     'row-menu': t => {
       const m = findItem(t.dataset.name);
       if (!m) return;
@@ -2606,7 +2811,7 @@
     'steam': t => steamOp(t.dataset.what),
     'launch-refresh': () => loadLaunch(true),
     'open-crash': t => openCrash(t.dataset.id),
-    'game-mods': t => { S.game.mods = t.dataset.v; renderGameBody(); },
+    'rep-mods': t => { S.rep.mods = t.dataset.v; renderReportsBody(); },
     'bisect-open': () => openBisect(),
     'bisect-scope': t => {
       const p = S.pane;
@@ -2713,8 +2918,13 @@
   });
   document.addEventListener('input', ev => {
     const t = ev.target;
-    if (t.id === 'cw-l') { const cw = S.cw || cwOf(prefs.custom || CUSTOM_DEFAULT); S.cw = Object.assign({}, cw, { l: +t.value }); setCustom(hslHex(S.cw.h, S.cw.s, S.cw.l)); return; }
-    if (t.id === 'cw-hex') { if (validHex(t.value)) { const x = normHex(t.value); S.cw = cwOf(x); setCustom(x); } return; }
+    const pk = (t.id || '').match(/^(cw|bw)-(l|hex)$/);
+    if (pk) {
+      const k = pk[1], P = PICKERS[k];
+      if (pk[2] === 'l') { const cw = S[k] || cwOf(P.cur(), k); S[k] = Object.assign({}, cw, { l: +t.value }); P.set(hslHex(S[k].h, S[k].s, S[k].l)); }
+      else if (validHex(t.value)) { const x = normHex(t.value); S[k] = cwOf(x, k); P.set(x); }
+      return;
+    }
     if (t.id === 'b-q') { S.b.q = t.value; debounce('bq', () => loadBrowse(true), 380); }
     else if (t.id === 'c-q') { S.c.q = t.value; debounce('cq', renderColResults, 150); }
     else if (t.id === 'lib-q') { S.lib.q = t.value; renderLibList(); }
@@ -2741,8 +2951,9 @@
     else if (d.bsel && S.pane && S.pane.kind === 'bisect') { S.pane.sel = S.pane.sel || {}; S.pane.sel[d.bsel] = t.checked; S.pane.scope = 'custom'; renderPane(); }
     else if (t.name === 'variant' && S.dl.variant) S.dl.variant.sub = t.value;
     else if (t.name === 'theme') setTheme(t.value);
-    else if (t.id === 'cw-l') savePrefs();
-    else if (t.id === 'cw-hex') { if (validHex(t.value)) { t.value = normHex(t.value); savePrefs(); } else { t.value = prefs.custom || CUSTOM_DEFAULT; toast('Not a color code', 'Use 6 hex digits, like #ff3349.', 'warn', 4000); } }
+    else if (t.name === 'bg') setBg(t.value);
+    else if (t.id === 'cw-l' || t.id === 'bw-l') savePrefs();
+    else if (t.id === 'cw-hex' || t.id === 'bw-hex') { if (validHex(t.value)) { t.value = normHex(t.value); savePrefs(); } else { t.value = PICKERS[t.id.slice(0, 2)].cur(); toast('Not a color code', 'Use 6 hex digits, like #ff3349.', 'warn', 4000); } }
     else if (d.perf) {
       prefs.perf = Object.assign({}, prefs.perf || {}, { [d.perf]: t.type === 'checkbox' ? t.checked : /^\d+$/.test(t.value) ? +t.value : t.value });
       savePrefs(); applyPerf(d.perf);
@@ -2773,27 +2984,28 @@
     if (ev.key === 'Enter' && ev.target.id === 's-key') { ev.preventDefault(); saveKey(); return; }
     if ((ev.key === 'b' || ev.key === 'B') && (ev.ctrlKey || ev.metaKey) && !ev.altKey && !typing()) { ev.preventDefault(); toggleSide(); return; }
     if (ev.key === '/' && !typing()) { const s = $('#b-q') || $('#c-q') || $('#lib-q') || $('#dl-q'); if (s) { ev.preventDefault(); s.focus(); } }
-    // color wheel: left/right = color, up/down = strength
-    if (ev.target.id === 'cw' && /^Arrow/.test(ev.key) && !ev.altKey) {
+    // color wheels: left/right = color, up/down = strength
+    if ((ev.target.id === 'cw' || ev.target.id === 'bw') && /^Arrow/.test(ev.key) && !ev.altKey) {
       ev.preventDefault();
-      const cw = Object.assign({}, S.cw || cwOf(prefs.custom || CUSTOM_DEFAULT)), step = ev.shiftKey ? 15 : 4;
+      const k = ev.target.id, cw = Object.assign({}, S[k] || cwOf(PICKERS[k].cur(), k)), step = ev.shiftKey ? 15 : 4;
       if (ev.key === 'ArrowLeft') cw.h = (cw.h - step + 360) % 360; else if (ev.key === 'ArrowRight') cw.h = (cw.h + step) % 360;
       else if (ev.key === 'ArrowUp') cw.s = Math.min(100, cw.s + step); else cw.s = Math.max(0, cw.s - step);
-      S.cw = cw; setCustom(hslHex(cw.h, cw.s, cw.l), true);
+      S[k] = cw; PICKERS[k].set(hslHex(cw.h, cw.s, cw.l), true);
     }
   });
   // color wheel drag: angle = color, distance from the center = strength (one update per frame)
   document.addEventListener('pointerdown', e => {
-    const w = e.target.closest && e.target.closest('#cw');
+    const w = e.target.closest && e.target.closest('#cw, #bw');
     if (!w || e.button !== 0) return;
     e.preventDefault(); w.focus(); w.setPointerCapture(e.pointerId);
+    const k = w.id;
     let last = e, queued = false;
     const pick = () => {
       queued = false;
       const r = w.getBoundingClientRect(), dx = last.clientX - (r.left + r.width / 2), dy = last.clientY - (r.top + r.height / 2);
-      const base = S.cw || cwOf(prefs.custom || CUSTOM_DEFAULT);
-      S.cw = { h: Math.round((Math.atan2(dy, dx) * 180 / Math.PI + 360) % 360), s: Math.round(Math.min(1, Math.hypot(dx, dy) / (r.width / 2)) * 100), l: base.l };
-      setCustom(hslHex(S.cw.h, S.cw.s, S.cw.l));
+      const base = S[k] || cwOf(PICKERS[k].cur(), k);
+      S[k] = { h: Math.round((Math.atan2(dy, dx) * 180 / Math.PI + 360) % 360), s: Math.round(Math.min(1, Math.hypot(dx, dy) / (r.width / 2)) * 100), l: base.l };
+      PICKERS[k].set(hslHex(S[k].h, S[k].s, S[k].l));
     };
     pick();
     const move = ev => { last = ev; if (!queued) { queued = true; requestAnimationFrame(pick); } };
@@ -2850,6 +3062,7 @@
         else if (j.status === 'done') toast(j.title, j.detail || 'Done', 'ok');
         else toast(j.title, j.error || 'Failed', 'bad', 14000);
         if (['restore', 'saves', 'vanilla'].includes(j.kind)) reloadBackups();
+        if (j.kind === 'cleanup' || (j.kind === 'saves' && $('#disk-now'))) loadDisk();
       }
     }
     S.jobsSeen = next;

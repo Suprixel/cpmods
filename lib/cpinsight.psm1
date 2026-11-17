@@ -565,20 +565,23 @@ function Read-CetSession([datetime]$Start, [datetime]$End) {
             if ($i -eq $from -and ([regex]::Matches($l, '\[\d{4}-\d{2}-\d{2} ')).Count -gt 1) { continue }
             if ($l -match $rx) {
                 $msg = ($l -replace '^(\s*\[[^\]]*\])+\s*', '').Trim()
-                if ($msg -and $seen.Add($msg) -and $errs.Count -lt 30) { $errs.Add([ordered]@{ level = 'error'; text = $msg; dir = $(if ($l -match '(?i)\\mods\\([^\\]+)\\') { $Matches[1] } elseif ($msg -match '^\[([^\]]+)\]') { $Matches[1] } else { $null }) }) }
+                # "stack traceback:" only announces the frames below the real error line
+                if ($msg -and $msg -ne 'stack traceback:' -and $seen.Add($msg) -and $errs.Count -lt 30) { $errs.Add([ordered]@{ level = 'error'; text = $msg; log = 'bin\x64\plugins\cyber_engine_tweaks\scripting.log'; dir = $(if ($l -match '(?i)\\mods\\([^\\]+)\\') { $Matches[1] } elseif ($msg -match '^\[([^\]]+)\]') { $Matches[1] } else { $null }) }) }
             }
         }
     }
     $md = Join-Path $dir 'mods'
     if (Test-Path -LiteralPath $md) {
         foreach ($f in @(Get-ChildItem -LiteralPath $md -Directory | ForEach-Object { Get-Item -LiteralPath (Join-Path $_.FullName "$($_.Name).log") -ErrorAction SilentlyContinue } | Where-Object { $_ -and $_.Length -gt 0 -and $_.LastWriteTime -ge $Start.AddSeconds(-5) })) {
-            $n = 0
+            $n = 0; $cur = $null
+            $rel = "bin\x64\plugins\cyber_engine_tweaks\mods\$($f.Directory.Name)\$($f.Name)"
             foreach ($l in (Read-SharedLines $f.FullName)) {
-                if ($l -notmatch $rx) { continue }
+                # lines without a time stamp (traceback frames) belong to the last stamped line, so old sessions stay out
                 $t = Get-LineTime $l
-                if ($t -and $t -lt $Start.AddSeconds(-5)) { continue }
+                if ($t) { $cur = $t }
+                if ($l -notmatch $rx -or ($cur -and $cur -lt $Start.AddSeconds(-5))) { continue }
                 $msg = ($l -replace '^(\s*\[[^\]]*\])+\s*', '').Trim()
-                if ($msg) { $errs.Add([ordered]@{ level = 'error'; text = $msg; dir = $f.Directory.Name }); $n++ }
+                if ($msg -and $msg -ne 'stack traceback:') { $errs.Add([ordered]@{ level = 'error'; text = $msg; log = $rel; dir = $f.Directory.Name }); $n++ }
                 if ($n -ge 8) { break }
             }
         }
@@ -619,6 +622,36 @@ function Get-ProblemNote([string]$Folder, [string]$Text) {
     if ($Folder -eq 'ArchiveXL' -and $Text -match "(?i)(\[QuestPhase\]|^Phase ).*doesn't exist") { return 'Harmless: a mod has an optional add-on for another mod you do not have, so ArchiveXL skips it.' }
     if ($Folder -eq 'ArchiveXL' -and $Text -match '(?i)skipped') { return 'ArchiveXL skipped one entry; the rest of the mod still loads.' }
     $null
+}
+
+# other mods a log message points to: the mod a game file it names comes from
+function Get-FileLinks([string]$Text, [string]$Mod, $Maps) {
+    $seen = [Collections.Generic.HashSet[string]]::new()
+    foreach ($x in [regex]::Matches($Text, '(?i)(?<![\w\\/])((?:r6|archive|bin|red4ext|engine|mods)[\\/][^\s''"():,]+\.[a-z0-9]{1,8})')) {
+        $rel = $x.Groups[1].Value -replace '/', '\'
+        $m = if ($Maps.file.ContainsKey($rel)) { $Maps.file[$rel] } else { $null }
+        if ($m -and $m -ne $Mod -and $seen.Add($m)) { [ordered]@{ mod = $m; why = "$([IO.Path]::GetFileName($rel)) comes from this mod" } }
+    }
+}
+
+# mods whose scripts also @replaceMethod the function annotated at $Rel:$Line (redscript keeps only one of them)
+function Get-ReplaceRivals([string]$Rel, [int]$Line, [string]$Mod, $Maps, [hashtable]$Cache) {
+    $g = (Get-CpPaths).game
+    $read = { param($r) if (-not $Cache.ContainsKey($r)) { $Cache[$r] = try { Read-SharedText (Join-Path $g $r) } catch { '' } }; $Cache[$r] }
+    $lines = (& $read $Rel) -split '\r?\n'
+    $cls = $null; $fn = $null
+    for ($i = [Math]::Max(0, $Line - 1); $i -lt [Math]::Min($lines.Count, $Line + 6); $i++) {
+        if (-not $cls) { if ($lines[$i] -match '@replaceMethod\((\w+)\)') { $cls = $Matches[1] } }
+        elseif ($lines[$i] -match '\bfunc\s+(\w+)') { $fn = $Matches[1]; break }
+    }
+    if (-not $fn) { return }
+    $rx = '@replaceMethod\(' + [regex]::Escape($cls) + '\)\s*(?:@\w+(?:\([^)]*\))?\s*)*(?:\w+\s+)*?func\s+' + [regex]::Escape($fn) + '\b'
+    $seen = [Collections.Generic.HashSet[string]]::new()
+    foreach ($k in @($Maps.file.Keys)) {
+        if ($k -notlike 'r6\scripts\*.reds' -or $k -eq $Rel) { continue }
+        $m = $Maps.file[$k]
+        if ($m -ne $Mod -and -not $seen.Contains($m) -and (& $read $k) -match $rx) { [void]$seen.Add($m); [ordered]@{ mod = $m; why = "also replaces $cls.$fn; only one of the two is used" } }
+    }
 }
 
 function Get-LaunchReport {
@@ -664,13 +697,16 @@ function Get-LaunchReport {
     $rsMod = $s.mods | Where-Object { $_.name -eq 'redscript' } | Select-Object -First 1
     if ($rsMod) { $fwv['redscript'] = "$($rsMod.version)".TrimStart('v') }
 
-    # every log problem becomes { source, level, text, mod, note }
+    # every log problem becomes { source, level, text, mod, note, file it names, log it came from, other mods involved }
     $probs = [Collections.Generic.List[object]]::new()
-    $addProb = { param($src, $lvl, $txt, $mod, $note, $file) $probs.Add([ordered]@{ source = $src; level = $lvl; text = $txt; mod = $mod; note = $note; file = $file }) }
+    $addProb = { param($src, $lvl, $txt, $mod, $note, $file, $log, $links)
+        if ($null -eq $links) { $links = @(Get-FileLinks $txt $mod $maps) }
+        $probs.Add([ordered]@{ source = $src; level = $lvl; text = $txt; mod = $mod; note = $note; file = $file; log = $log; links = @($links) }) }
+    $r4log = "red4ext\logs\$($last.log)"
     foreach ($p in $last.problems) {
         $rel = Get-RelGamePath $p.path
         $mod = if ($rel -and $maps.file.ContainsKey($rel)) { $maps.file[$rel] } else { $null }
-        & $addProb 'RED4ext' $p.level $p.text $mod $null $rel
+        & $addProb 'RED4ext' $p.level $p.text $mod $null $rel $r4log
     }
 
     # plugin logs (ArchiveXL / TweakXL lines get attributed by content)
@@ -704,7 +740,7 @@ function Get-LaunchReport {
                 }
                 $mod = $hit
             }
-            & $addProb $(if ($lg.folder) { $lg.folder } else { $lg.name }) $p.level $p.text $mod (Get-ProblemNote $lg.folder $p.text) $lg.log
+            & $addProb $(if ($lg.folder) { $lg.folder } else { $lg.name }) $p.level $p.text $mod (Get-ProblemNote $lg.folder $p.text) $null $lg.log
         }
     }
     $rep.logs = @($plugLogs | ForEach-Object { [ordered]@{ log = $_.log; folder = $_.folder; problems = @($_.problems).Count } })
@@ -715,12 +751,22 @@ function Get-LaunchReport {
     $rs = Read-RedscriptLog $start $end
     $rep.scripts = $rs
     if ($rs -and $rs.thisLaunch) {
+        $rsLog = 'r6\logs\redscript_rCURRENT.log'; $rsText = @{}
         foreach ($e in @($rs.errors) + @($rs.warnings)) {
             $mod = if ($e.file -and $maps.file.ContainsKey($e.file)) { $maps.file[$e.file] } else { $null }
-            & $addProb 'redscript' $e.level (@($e.text) + @($e.more | Select-Object -First 3) -join ' ') $mod $null $e.file
+            # "At <file>:<line>:<col>:", the code line, a ^^^ marker, then the message: shown message first, then where
+            $more = @($e.more); $ci = -1; $ln = 0
+            for ($k = 0; $k -lt $more.Count; $k++) { if ($more[$k] -match '^\s*\^+\s*$') { $ci = $k; break } }
+            if ($e.text -match ':(\d+):\d+:\s*$' -and $ci -ge 1 -and $ci + 1 -lt $more.Count) {
+                $ln = [int]$Matches[1]; $msg = $more[$ci + 1].Trim()
+                $txt = "$($msg.Substring(0, 1).ToUpper())$($msg.Substring(1)) ($(if ($e.file) { $e.file -replace '^r6\\scripts\\', '' } else { 'script' }) line ${ln}: $($more[$ci - 1].Trim()))"
+            }
+            else { $txt = (@($e.text) + @($more | Select-Object -First 3) -join ' ') -replace [regex]::Escape("$g\"), '' }
+            $links = if ($ln -and $e.file -and ($more -join ' ') -match '@replaceMethod\(') { @(Get-ReplaceRivals $e.file $ln $mod $maps $rsText) } else { $null }
+            & $addProb 'redscript' $e.level $txt $mod $null $e.file $rsLog $links
         }
     }
-    if ($last.scc -eq 'failed') { & $addProb 'RED4ext' 'error' "Script compiler: $($last.sccText)" $null $null $null }
+    if ($last.scc -eq 'failed') { & $addProb 'RED4ext' 'error' "Script compiler: $($last.sccText)" $null $null $null $r4log }
 
     # Cyber Engine Tweaks
     $cet = Read-CetSession $start $end
@@ -729,7 +775,7 @@ function Get-LaunchReport {
         if ($cet.version) { $fwv['Cyber Engine Tweaks'] = $cet.version.TrimStart('v') }
         foreach ($e in $cet.errors) {
             $mod = if ($e.dir -and $maps.dir.ContainsKey("bin\x64\plugins\cyber_engine_tweaks\mods\$($e.dir)")) { $maps.dir["bin\x64\plugins\cyber_engine_tweaks\mods\$($e.dir)"] } else { $null }
-            & $addProb 'Cyber Engine Tweaks' $e.level $e.text $mod $null $null
+            & $addProb 'Cyber Engine Tweaks' $e.level $e.text $mod $null $null $e.log
         }
     }
     $rep.tweak = [ordered]@{ problems = @($probs | Where-Object { $_.source -eq 'TweakXL' }).Count }
@@ -754,20 +800,20 @@ function Get-LaunchReport {
         if ($dlls) {
             $hit = @($rep.plugins | Where-Object { $_.file -and $dlls -contains $_.file })
             if ($hit) { $verified = $true; $notes.Add([ordered]@{ level = 'ok'; text = "RED4ext loaded $($hit[0].name) $($hit[0].version)" }) }
-            elseif (-not $isNew -and $last.plugins.Count) { $lvl = 'error'; $plugFail.Add($m.name); $notes.Add([ordered]@{ level = 'error'; text = 'RED4ext did not load its plugin (.dll). It may need an update for this game version, or a requirement is missing.' }) }
+            elseif (-not $isNew -and $last.plugins.Count) { $lvl = 'error'; $plugFail.Add($m.name); $notes.Add([ordered]@{ level = 'error'; text = 'RED4ext did not load its plugin (.dll). It may need an update for this game version, or a requirement is missing.'; file = $dlls[0]; log = $r4log }) }
         }
         $reds = @($files | Where-Object { $_ -like 'r6\scripts\*.reds' })
         if ($reds -and $rs -and $rs.thisLaunch) {
             $n = @($reds | Where-Object { $compiled.Contains($_) }).Count
             if ($rs.status -eq 'failed') { $lvl = 'error'; $notes.Add([ordered]@{ level = 'error'; text = 'Scripts failed to compile, so the game ran without any script mods.' }) }
             elseif ($n) { $verified = $true; $notes.Add([ordered]@{ level = 'ok'; text = "redscript compiled $n script file$(if ($n -ne 1) { 's' })" }) }
-            elseif (-not $isNew) { if ($order['warn'] -lt $order[$lvl]) { $lvl = 'warn' }; $notes.Add([ordered]@{ level = 'warn'; text = 'Its scripts were not in the last compile.' }) }
+            elseif (-not $isNew) { if ($order['warn'] -lt $order[$lvl]) { $lvl = 'warn' }; $notes.Add([ordered]@{ level = 'warn'; text = 'Its scripts were not in the last compile.'; log = 'r6\logs\redscript_rCURRENT.log' }) }
         }
         $cetDirs = @($files | Where-Object { $_ -like 'bin\x64\plugins\cyber_engine_tweaks\mods\*\*' } | ForEach-Object { ($_ -split '\\')[5] } | Sort-Object -Unique)
         if ($cetDirs -and $cet -and $cet.ran) {
             $ok = @($cetDirs | Where-Object { $cetLoaded.Contains($_) })
             if ($ok) { $verified = $true; $notes.Add([ordered]@{ level = 'ok'; text = "Cyber Engine Tweaks loaded it ($($ok -join ', '))" }) }
-            elseif (-not $isNew -and $cetLoaded.Count) { if ($order['warn'] -lt $order[$lvl]) { $lvl = 'warn' }; $notes.Add([ordered]@{ level = 'warn'; text = 'Cyber Engine Tweaks did not report loading it.' }) }
+            elseif (-not $isNew -and $cetLoaded.Count) { if ($order['warn'] -lt $order[$lvl]) { $lvl = 'warn' }; $notes.Add([ordered]@{ level = 'warn'; text = 'Cyber Engine Tweaks did not report loading it.'; log = 'bin\x64\plugins\cyber_engine_tweaks\scripting.log' }) }
         }
         $xlAll = @($files | Where-Object { $_ -match '\.(xl|archivexl)$' })
         $xls = @($xlAll | ForEach-Object { [IO.Path]::GetFileName($_) })
@@ -786,7 +832,7 @@ function Get-LaunchReport {
         foreach ($p in @($probs | Where-Object { $_.mod -eq $m.name })) {
             # a known, explained message is at most worth a check
             $pl = if ($p.note -and $p.note -like 'Harmless*') { 'info' } elseif ($p.note) { 'warn' } else { $p.level }
-            $notes.Add([ordered]@{ level = $pl; text = "$($p.source): $($p.text)"; note = $p.note })
+            $notes.Add([ordered]@{ level = $pl; text = "$($p.source): $($p.text)"; note = $p.note; file = $p.file; log = $p.log; links = @($p.links) })
             if ($pl -eq 'error' -and $order['error'] -lt $order[$lvl]) { $lvl = 'error' }
             elseif ($pl -eq 'warn' -and $order['warn'] -lt $order[$lvl]) { $lvl = 'warn' }
         }
@@ -808,18 +854,19 @@ function Get-LaunchReport {
     elseif ($res.result -eq 'ended') { $iss.Add([ordered]@{ level = 'warn'; title = 'The game stopped without closing normally'; detail = 'No crash report was written. It may have been closed from Task Manager or crashed too hard to report.' }) }
     if ($last.scc -eq 'failed' -or ($rs -and $rs.thisLaunch -and $rs.status -eq 'failed')) {
         $bad = @($probs | Where-Object { $_.source -eq 'redscript' -and $_.level -eq 'error' -and $_.mod } | ForEach-Object mod | Sort-Object -Unique)
-        $iss.Add([ordered]@{ level = 'bad'; title = 'Scripts did not compile'; detail = "When that happens the game runs without any script mods.$(if ($bad) { " Errors point to: $($bad -join ', '). Update or disable it." } else { ' See the script errors below.' })"; mods = $bad })
+        $iss.Add([ordered]@{ level = 'bad'; title = 'Scripts did not compile'; detail = "When that happens the game runs without any script mods.$(if ($bad) { " Errors point to: $($bad -join ', '). Update or disable it." } else { ' See the script errors below.' })"; mods = $bad; log = 'r6\logs\redscript_rCURRENT.log' })
     }
+    # one card per mod: its first problem, with where it was logged, the file it names and other mods involved
     foreach ($m in @($rep.mods | Where-Object { $_.status -eq 'error' })) {
         $first = @($m.notes | Where-Object { $_.level -eq 'error' })[0]
-        $iss.Add([ordered]@{ level = 'bad'; title = "$($m.name) has a problem"; detail = $first.text; mods = @($m.name) })
+        $iss.Add([ordered]@{ level = 'bad'; kind = 'mod'; title = "$($m.name) has a problem"; detail = $first.text; msg = $first.text; mods = @($m.name); log = $first.log; file = $first.file; links = @($first.links) })
     }
     foreach ($m in @($rep.mods | Where-Object { $_.status -eq 'warn' })) {
         $first = @($m.notes | Where-Object { $_.level -eq 'warn' })[0]
-        $iss.Add([ordered]@{ level = 'warn'; title = "Check $($m.name)"; detail = "$($first.text)$(if ($first.note) { " $($first.note)" })"; mods = @($m.name) })
+        $iss.Add([ordered]@{ level = 'warn'; kind = 'mod'; title = "Check $($m.name)"; detail = "$($first.text)$(if ($first.note) { " $($first.note)" })"; msg = $first.text; mods = @($m.name); log = $first.log; file = $first.file; links = @($first.links) })
     }
     $orphan = @($probs | Where-Object { -not $_.mod -and $_.level -eq 'error' -and -not $_.note })
-    if ($orphan.Count) { $iss.Add([ordered]@{ level = 'warn'; title = "$($orphan.Count) error$(if ($orphan.Count -ne 1) { 's' }) not linked to a mod"; detail = (@($orphan | Select-Object -First 3 | ForEach-Object { "$($_.source): $($_.text)" }) -join ' | ') }) }
+    if ($orphan.Count) { $iss.Add([ordered]@{ level = 'warn'; title = "$($orphan.Count) error$(if ($orphan.Count -ne 1) { 's' }) not linked to a mod"; detail = (@($orphan | Select-Object -First 3 | ForEach-Object { "$($_.source): $($_.text)" }) -join ' | '); log = $orphan[0].log }) }
     $harmless = @($probs | Where-Object { $_.note -like 'Harmless*' })
     if ($harmless.Count) { $iss.Add([ordered]@{ level = 'info'; title = "$($harmless.Count) harmless warning$(if ($harmless.Count -ne 1) { 's' })"; detail = 'Messages that look scary in the logs but need no action (for example optional add-ons for mods you do not have).' }) }
     if ($untested.Count) { $iss.Add([ordered]@{ level = 'info'; title = "$($untested.Count) mod$(if ($untested.Count -ne 1) { 's' }) added since this launch"; detail = 'Launch once to test them: ' + (@($untested | Select-Object -First 6) -join ', ') + $(if ($untested.Count -gt 6) { ', ...' } else { '' }); mods = @($untested) }) }
