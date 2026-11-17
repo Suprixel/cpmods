@@ -77,6 +77,7 @@ try {
         'shortcuts' { New-CpShortcuts | ForEach-Object { Write-Note "Shortcut: $_" Green } }
         'package' { Write-Note "Created $(New-CpPackage)" Green }
         'compat' {
+            Import-Module (Join-Path $PSScriptRoot 'lib\cpinsight.psm1') -Force -DisableNameChecking
             $r = Test-ModCompat
             foreach ($i in $r.issues) {
                 $c = switch ($i.risk) { 'high' { 'Red' } 'medium' { 'Yellow' } 'ok' { 'DarkGreen' } default { 'Gray' } }

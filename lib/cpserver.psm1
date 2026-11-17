@@ -1,7 +1,6 @@
 # cpmods HTTP API: request routing, background jobs, Nexus GraphQL proxy
 $ErrorActionPreference = 'Stop'
 $script:UiDir = Join-Path (Split-Path -Parent $PSScriptRoot) 'ui'
-$script:UiBetaDir = Join-Path (Split-Path -Parent $PSScriptRoot) 'ui-beta'
 $script:Mime = @{ '.html' = 'text/html; charset=utf-8'; '.js' = 'text/javascript; charset=utf-8'; '.css' = 'text/css; charset=utf-8'; '.svg' = 'image/svg+xml' }
 
 # Job bodies run in their own runspace: param($Job, $P, $Shared)
@@ -47,8 +46,14 @@ Use-Lock { Disable-InstalledMod -Name $P.name }
     enable      = @'
 param($Job, $P, $Shared)
 Save-AutoSafety "Before turning on $($P.name)"
-Use-Lock { Enable-InstalledMod -Name $P.name }
-"Enabled $($P.name)"
+Use-Lock {
+    $r = Enable-InstalledMod -Name $P.name -Ask:(Test-AskOverwrite)
+    if (-not $r.conflict) { return "Enabled $($P.name)" }
+    # another mod has some of its files now: waits for your choice, like an install
+    $d = (Get-State).disabled | Where-Object { $_.name -eq $P.name } | Select-Object -First 1
+    Add-Deferred 'pending' $d.archive (Copy-Meta $d) '' $r.conflict
+    "$($P.name): waiting for your choice (another mod has some of the same files)"
+}
 '@
     adopt       = @'
 param($Job, $P, $Shared)
@@ -116,11 +121,9 @@ function Send-Json($Ctx, $Obj, [int]$Code = 200) {
 }
 
 function Send-Static($Ctx, [string]$Path, $Shared) {
-    $dir = $script:UiDir
-    if ($Path -eq '/beta' -or $Path.StartsWith('/beta/')) { $dir = $script:UiBetaDir; $Path = $Path.Substring(5); if (-not $Path) { $Path = '/' } }
     $name = if ($Path -eq '/' -or $Path -eq '/index.html') { 'index.html' } else { $Path.TrimStart('/') }
     if ($name -notmatch '^[\w\-]+\.(html|js|css|svg)$') { Send-Json $Ctx @{ error = 'not found' } 404; return }
-    $file = Join-Path $dir $name
+    $file = Join-Path $script:UiDir $name
     if (-not (Test-Path -LiteralPath $file)) { Send-Json $Ctx @{ error = 'not found' } 404; return }
     $ext = [IO.Path]::GetExtension($file)
     if ($ext -eq '.html') {
@@ -137,6 +140,8 @@ function Send-Gql($Ctx, [string]$Raw, $Shared) {
     $resp = Invoke-WebRequest -Method Post -Uri 'https://api.nexusmods.com/v2/graphql' -ContentType 'application/json; charset=utf-8' -Body ([Text.Encoding]::UTF8.GetBytes($Raw)) -Headers @{ 'User-Agent' = 'cpmods/2.0' } -TimeoutSec 45 -SkipHttpErrorCheck
     $txt = if ($resp.Content -is [byte[]]) { [Text.Encoding]::UTF8.GetString($resp.Content) } else { [string]$resp.Content }
     if ([int]$resp.StatusCode -eq 200 -and $txt -notmatch '"errors"\s*:') {
+        # answers count for 5 min: older ones go now, so browsing Discover never piles them up (the cap bounds the rest)
+        foreach ($k in @($Shared.cache.Keys)) { $e = $Shared.cache[$k]; if ("$k".StartsWith('gql-') -and $e -and ([datetime]::UtcNow - $e.t).TotalSeconds -ge 300) { $Shared.cache.Remove($k) } }
         if ($Shared.cache.Count -gt 400) { $Shared.cache.Clear() }
         $Shared.cache[$key] = @{ t = [datetime]::UtcNow; v = $txt }
     }
@@ -283,7 +288,8 @@ function Get-BriefCached($Shared) {
     if ($c -and $c.k -eq $k -and (-not $run -or ([datetime]::UtcNow - $c.t).TotalSeconds -lt 4)) { return $c.v }
     $v = Get-LaunchBrief
     $Shared.cache['brief'] = @{ k = $k; t = [datetime]::UtcNow; v = $v }
-    if ($v.result -eq 'clean') { try { Save-CleanRestorePoint $v } catch { } }
+    # saved by Get-UiState (a worker): this also runs on the main loop, which must never wait for the install lock
+    if ($v.result -eq 'clean') { $Shared.cleanDue = $v }
     $v
 }
 
@@ -322,6 +328,8 @@ function Get-UiState($Shared) {
         }
     }
     $van = Get-VanillaState
+    $launch = try { Get-BriefCached $Shared } catch { $null }
+    if ($Shared.cleanDue) { $v = $Shared.cleanDue; $Shared.cleanDue = $null; try { Save-CleanRestorePoint $v } catch { } }
     $failed = foreach ($f in $s.failed) { [ordered]@{ name = $f.meta.name; archive = [IO.Path]::GetFileName("$($f.archive)"); error = $f.error; at = $f.at; modId = $f.meta.modId } }
     $jobs = foreach ($j in @($Shared.jobs.Values)) {
         [ordered]@{ id = $j.id; kind = $j.kind; title = $j.title; status = $j.status; phase = $j.phase; total = $j.total; done = $j.done; detail = $j.detail; error = $j.error; next = $j.next; started = $j.started; finished = $j.finished; modId = $j.modId; fileId = $j.fileId }
@@ -341,7 +349,7 @@ function Get-UiState($Shared) {
         frameworks = @(Get-Frameworks | ForEach-Object { [ordered]@{ name = $_.name; nexusId = $_.nexusId; repo = $_.repo } })
         browsers   = @(Get-Cached $Shared 'browsers' 600 { @(Get-InstalledBrowsers) })
         paths      = Get-CpPaths
-        launch     = $(try { Get-BriefCached $Shared } catch { $null })
+        launch     = $launch
         bisect     = $(try { Get-BisectState } catch { $null })
         vanilla    = $(if ($van) { [ordered]@{ started = $van.started; seen = [bool]$van.gameSeen; parked = @($van.moves | Where-Object { $_.done }).Count } } else { $null })
     }
@@ -483,11 +491,6 @@ function Invoke-CpRequest {
             'GET /api/log' {
                 $lines = @(Get-Content -LiteralPath (Get-CpPaths).log -Tail 200 -ErrorAction SilentlyContinue)
                 Send-Json $Ctx @{ lines = $lines }
-            }
-            'GET /api/files' {
-                $m = (Get-State).mods | Where-Object { $_.name -eq $q['name'] } | Select-Object -First 1
-                if (-not $m) { Send-Json $Ctx @{ error = 'not installed' } 404; return }
-                Send-Json $Ctx @{ files = @($m.files); backups = @($m.backups) }
             }
             'GET /api/archive' { Send-Json $Ctx (Get-ArchiveCandidates (Resolve-DownloadFile $q['file'])) }
             'POST /api/get' {

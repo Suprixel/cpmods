@@ -188,6 +188,26 @@ try {
     $ast = [Management.Automation.Language.Parser]::ParseFile((Join-Path (Split-Path $PSScriptRoot) 'lib\cpwindow.ps1'), [ref]$null, [ref]$null)
     Add-Type -TypeDefinition $ast.Find({ param($n) $n -is [Management.Automation.Language.AssignmentStatementAst] -and "$($n.Left)" -eq '$frameSrc' }, $true).Right.Expression.Value
     Check (('CpFrame' -as [type]) -and ('CpAppId' -as [type])) 'T16 CpFrame and CpAppId compile'
+
+    Write-Host '--- T17: troubleshooting finds the mod behind a problem and turns the others back on'
+    $ks = foreach ($k in 'K1', 'K2', 'K3', 'K4') { Install-ModArchive (New-TestMod $k @{ "archive\pc\mod\$k.archive" = $k }) (& $meta $k) | Out-Null; $k }
+    [void](Start-Bisect -Names $ks)
+    # each "launch" has the problem only while K3 is on
+    for ($i = 0; $i -lt 6 -and (Get-BisectState).phase -ne 'done'; $i++) { [void](Submit-BisectResult -Ok (-not ((Get-State).mods | Where-Object name -eq 'K3'))) }
+    $b = Get-BisectState; $on = @((Get-State).mods | ForEach-Object { $_.name })
+    Check ($b.outcome -eq 'found' -and $b.culprit -eq 'K3') "T17 found K3: $($b.outcome) $($b.culprit)"
+    Check ($on -contains 'K1' -and $on -contains 'K2' -and $on -contains 'K4' -and $on -notcontains 'K3') "T17 the others are on, K3 off: $($on -join ', ')"
+    [void](Stop-Bisect -KeepCulprit $true)
+    Check (-not (Get-BisectState) -and ((Get-State).disabled | Where-Object name -eq 'K3')) 'T17 finished, K3 stays off'
+
+    Write-Host '--- T18: turning a mod back on asks when another mod has its files now'
+    $shared = 'r6\config\shared.xml'
+    Install-ModArchive (New-TestMod 'ModP' @{ $shared = 'P' }) (& $meta 'ModP') | Out-Null
+    Disable-InstalledMod 'ModP'
+    Install-ModArchive (New-TestMod 'ModQ' @{ $shared = 'Q' }) (& $meta 'ModQ') | Out-Null
+    $r = Enable-InstalledMod 'ModP' -Ask
+    Check ($r.conflict -and (& $cont $shared) -eq 'Q' -and ((Get-State).disabled | Where-Object name -eq 'ModP')) 'T18 asks and changes nothing'
+    Check ($null -eq (Enable-InstalledMod 'ModP') -and (& $cont $shared) -eq 'P') 'T18 without -Ask it turns on as before (troubleshooting, restore points)'
 }
 catch { $script:fails++; Write-Host "FAIL (stopped): $($_.Exception.Message)" -ForegroundColor Red }
 finally {

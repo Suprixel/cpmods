@@ -81,7 +81,7 @@ $shared.iss = $iss
 # built-in window (lib\cpwindow.ps1): own STA thread, started on first use, driven by these flags
 $shared.winEvt = [Threading.AutoResetEvent]::new($false)
 $shared.urls = [Collections.ArrayList]::Synchronized([Collections.ArrayList]::new())
-$shared.winUrl = "http://localhost:$Port/" + $(if ((Get-CpSettings).uiChannel -eq 'beta') { 'beta/' } else { '' })
+$shared.winUrl = "http://localhost:$Port/"
 $shared.winFile = Join-Path (Get-CpPaths).state 'window.json'
 $shared.uiFile = Join-Path (Get-CpPaths).state 'ui.json'
 $shared.winTitle = if ($Dev) { 'Cyberpunk Mods (dev)' } else { 'Cyberpunk Mods' }

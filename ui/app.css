@@ -62,7 +62,6 @@ svg.i { width: 18px; height: 18px; flex: none; }
 .brand .acc { color: var(--accent-text); }
 .logo { position: relative; width: 20px; height: 20px; flex: none; background: var(--accent-bar); clip-path: polygon(0 0, 100% 0, 100% 68%, 68% 100%, 0 100%); }
 .logo::after { content: ""; position: absolute; left: 5px; top: 5px; width: 7px; height: 7px; background: var(--side); clip-path: polygon(0 0, 100% 0, 100% 55%, 55% 100%, 0 100%); }
-.beta-tag { font-family: "Segoe UI", system-ui, sans-serif; font-size: 9px; font-weight: 700; letter-spacing: .08em; text-transform: uppercase; padding: 1px 4px; border-radius: 5px; color: var(--text3); background: var(--raised); border: 1px solid var(--line2); }
 .nav { display: flex; flex-direction: column; gap: 2px; }
 .nav-item { position: relative; display: flex; align-items: center; gap: 12px; width: 100%; padding: 9px 12px; border: 0; border-radius: var(--r-sm); background: none; color: var(--text2); font-weight: 600; text-align: left; cursor: pointer; }
 .nav-item:hover { background: var(--hover); color: var(--text); }
@@ -460,7 +459,7 @@ html.pics-off .row-thumb { display: none; }
 .side-toggle:hover { background: var(--hover); color: var(--text); }
 .app.side-min { grid-template-columns: 64px minmax(0, 1fr); }
 .app.side-min .side { padding: 18px 8px 14px; }
-.app.side-min .wordmark, .app.side-min .beta-tag, .app.side-min .nav-item span, .app.side-min .nav-count, .app.side-min .side-links, .app.side-min .gc-title, .app.side-min .gc-sub, .app.side-min .gc-last, .app.side-min .side-toggle span, .app.side-min .play-row .btn span { display: none; }
+.app.side-min .wordmark, .app.side-min .nav-item span, .app.side-min .nav-count, .app.side-min .side-links, .app.side-min .gc-title, .app.side-min .gc-sub, .app.side-min .gc-last, .app.side-min .side-toggle span, .app.side-min .play-row .btn span { display: none; }
 .app.side-min .brand-row { flex-direction: column; justify-content: center; gap: 10px; padding-bottom: 8px; }
 .app.side-min .brand { padding: 0; }
 .app.side-min .hist { flex-direction: column; }
@@ -839,7 +838,7 @@ input.hex-in { width: 100px; font: 13px "Cascadia Mono", Consolas, monospace; }
 
 @media (max-width: 780px) {
   .app { grid-template-columns: 64px minmax(0, 1fr); }
-  .wordmark, .beta-tag, .nav-item span, .nav-count, .side-links, .gc-title, .gc-sub, .gc-last, .side-toggle, .play-row .btn span { display: none; }
+  .wordmark, .nav-item span, .nav-count, .side-links, .gc-title, .gc-sub, .gc-last, .side-toggle, .play-row .btn span { display: none; }
   .brand-row { flex-direction: column; justify-content: center; gap: 10px; padding-bottom: 8px; }
   .brand { padding: 0; }
   .hist { flex-direction: column; }

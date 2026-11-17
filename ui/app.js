@@ -2,7 +2,6 @@
 (() => {
   // ---------- constants ----------
   const TOKEN = window.CP_TOKEN || '';
-  const CHANNEL = location.pathname.startsWith('/beta') ? 'beta' : 'release';
   const GAME = 'cyberpunk2077';
   const NEXUS = 'https://www.nexusmods.com/' + GAME;
   const NEXUS_NEXT = 'https://next.nexusmods.com/' + GAME;
@@ -485,7 +484,7 @@
     const sub = !g ? '' : g.missing ? 'not found' : g.running ? 'running' : left.length ? 'closing' : g.updatePending ? 'update pending' : 'ready';
     const html = !g ? '' : `<div class="gamecard${g.running ? ' live' : ''}"><div class="gc-top"><div class="gc-title">Cyberpunk 2077</div><div class="gc-sub"><span class="dot ${g.missing ? 'bad' : g.running ? 'run' : left.length || g.updatePending ? 'warn' : ''}"></span>${h(g.version || '?')} &middot; ${sub}</div>${last}</div>
       <div class="play-row"><button class="btn primary" data-act="play"${g.running || g.missing ? ' disabled' : ''} title="Launch ${h(mode)}">${ic('play')}<span>${g.running ? 'Running' : 'Play'}</span></button>${killBtn()}<button class="btn icon-only" data-act="play-menu" title="Launch options and game folders" aria-label="Launch options and game folders">${ic('down')}</button></div></div>
-      <div class="side-links"><button data-act="go" data-page="settings">Nexus key: ${st.key ? 'set' : 'missing'}</button>${CHANNEL === 'beta' ? '<button data-act="channel" data-v="release" title="Back to the release version of cpmods">Back to release</button>' : '<button data-act="channel" data-v="beta" title="Switch to the beta: new features being tested">Try the beta</button>'}</div>
+      <div class="side-links"><button data-act="go" data-page="settings">Nexus key: ${st.key ? 'set' : 'missing'}</button></div>
       <button class="side-toggle" data-act="side-toggle" title="${prefs.sideMin ? 'Expand' : 'Collapse'} the sidebar (Ctrl+B)" aria-label="${prefs.sideMin ? 'Expand' : 'Collapse'} the sidebar">${ic(prefs.sideMin ? 'sidemax' : 'sidemin')}<span>Collapse</span></button>`;
     setHtml($('#sidefoot'), html);
   }
@@ -1395,7 +1394,7 @@
       nexus: [st.key ? 'API key set' : 'API key missing', st.handler ? 'download links work' : 'download links not set up'],
       patch: [`"Updated for ${s.patchLabel}" means updated since ${fmtDate(s.patchDate)}`],
       share: ['App zip, your mod list, your mod settings'],
-      app: [CHANNEL === 'beta' ? 'Beta' : 'Release', prefs.sideMin ? 'compact sidebar' : '', prefs.explain === true ? 'folders explained' : ''],
+      app: [prefs.sideMin ? 'compact sidebar' : '', prefs.explain === true ? 'folders explained' : ''],
     }[k] || [];
     return parts.filter(Boolean).join(' · ');
   }
@@ -1420,8 +1419,7 @@
     if (k === 'share') return `<p class="dim small" style="margin:0 0 12px">Creates a zip on your desktop with the app and an Install.cmd. No API key or downloads are included. Mods your friend already has are left alone.</p>
       <label class="check-row"><input type="checkbox" class="check" id="s-share-set"${S.shareSettings ? ' checked' : ''}> Include my mod settings (CET mods, Mod Settings, hotkeys). Your friend restores them in Backups, Mod settings.</label>
       <div class="toolbar" style="margin-top:12px"><button class="btn primary" data-act="package" data-apponly="1">App only</button><button class="btn" data-act="package">App + my mod list</button><button class="btn ghost" data-act="modlist-export">Save mod list file</button></div>`;
-    return srow('Use the beta', 'New features being tested. Switch back to the release at any time.', `<label class="switch"><input type="checkbox" data-uiver${CHANNEL === 'beta' ? ' checked' : ''} aria-label="Use the beta"><span></span></label>`)
-      + srow('Only show missing requirements', 'In a mod\'s details, hide requirements you already have. A "Show" link there brings them back.', `<label class="switch"><input type="checkbox" data-pref="reqMissingOnly"${prefs.reqMissingOnly ? ' checked' : ''} aria-label="Only show missing requirements"><span></span></label>`)
+    return srow('Only show missing requirements', 'In a mod\'s details, hide requirements you already have. A "Show" link there brings them back.', `<label class="switch"><input type="checkbox" data-pref="reqMissingOnly"${prefs.reqMissingOnly ? ' checked' : ''} aria-label="Only show missing requirements"><span></span></label>`)
       + srow('Explain game folders', 'In file trees and the folder map, describe what each folder holds.', `<label class="switch"><input type="checkbox" data-pref="explain"${prefs.explain === true ? ' checked' : ''} aria-label="Explain game folders"><span></span></label>`)
       + srow('Compact sidebar', 'Show only icons on the left (Ctrl+B).', `<label class="switch"><input type="checkbox" data-pref="sideMin"${prefs.sideMin ? ' checked' : ''} aria-label="Compact sidebar"><span></span></label>`)
       + srow('Folders', `Game: ${h(st.paths.game)}<br>Downloads: ${h(st.paths.downloads)}`, `<span class="btn-pair"><button class="btn sm" data-act="sys" data-op="folder">${ic('folder')}Game</button><button class="btn sm" data-act="sys" data-op="downloads">${ic('folder')}Downloads</button></span>`)
@@ -2530,11 +2528,6 @@
     try { await api('/api/vanilla', { op: 'restore' }); toast('Bringing your mods back', '', '', 3000); await refreshState(); }
     catch (e) { toast('Could not bring them back', e.message, 'bad', 10000); }
   }
-  // release and beta share settings and preferences; the page reloads in the other channel
-  async function switchChannel(v) {
-    try { flushPrefs(); await api('/api/settings', { uiChannel: v }); location.href = (v === 'beta' ? '/beta/' : '/') + location.hash; }
-    catch (e) { toast('Could not switch', e.message, 'bad'); }
-  }
 
   const A = {
     'go': t => go(t.dataset.page),
@@ -2678,7 +2671,6 @@
     'perf-free': () => { IMG.free(); api('/api/free', {}).catch(() => { }); toast('Freeing memory', 'New numbers in a few seconds.', '', 2500); setTimeout(loadPerfNow, 4000); },
     'perf-refresh': () => { S.perfNow = null; const el = $('#perf-now'); if (el) el.innerHTML = perfNowHtml(); loadPerfNow(); },
     'toast-close': t => { const x = t.closest('.toast'); if (x) x.remove(); },
-    'channel': t => switchChannel(t.dataset.v),
     'settings-at': t => openSettings(t.dataset.k),
     'sx': t => toggleSection(t.dataset.k),
     'sx-all': () => { const open = setOpen(), all = SECTIONS.every(x => open.has(x.k)); prefs.setOpen = all ? [] : SECTIONS.map(x => x.k); savePrefs(); pageSettings($('#page')); },
@@ -2764,7 +2756,6 @@
     else if (d.setsel) saveSettings({ [d.setsel]: t.value }, false);
     else if (d.setting) saveSettings({ [d.setting]: t.checked }, false);
     else if (t.id === 's-browser') saveSettings({ browser: t.value }, false);
-    else if ('uiver' in d) switchChannel(t.checked ? 'beta' : 'release');
     else if (t.id === 'ml-file' && t.files && t.files[0]) importModList(t.files[0]);
     else if (t.id === 'bk-file' && t.files && t.files[0]) bkImport(t.files[0]);
     else if (t.id === 's-share-set') S.shareSettings = t.checked;
