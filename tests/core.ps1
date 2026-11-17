@@ -244,10 +244,73 @@ try {
     [void](Invoke-StorageCleanup $false)
     Check (-not (Test-Path "$dl\spare.zip") -and (Test-Path "$dl\pt.zip") -and (Test-Path "$dl\pt2.zip") -and (Test-Path "$dl\fresh.zip")) 'T21 only the unused old download is deleted'
     Check (-not (Test-Path "$Sb\tmp\stale") -and (Test-Path "$Sb\tmp\recent")) 'T21 old leftovers in tmp go, recent ones stay'
+
+    Write-Host '--- T22: turning a mod on through the app (job script): a conflict waits for a choice; removing the mod drops it'
+    Import-Module "$Sb\lib\cpserver.psm1" -Force -DisableNameChecking
+    $jobScripts = & (Get-Module cpserver) { $script:JobScripts }
+    $runJob = { param($k, $P) & ([scriptblock]::Create($jobScripts[$k])) ([hashtable]::Synchronized(@{})) $P @{ cache = @{} } }
+    Disable-InstalledMod 'ModP'
+    $out = & $runJob 'enable' @{ name = 'ModP' }; $st = Get-State
+    $pend = $st.pending | Where-Object { $_.meta.name -eq 'ModP' } | Select-Object -First 1
+    Check ("$out" -like '*waiting for your choice*' -and ($st.disabled | Where-Object name -eq 'ModP') -and $pend -and (& $cont $shared) -eq 'Q') 'T22 the enable job parks the conflict and changes nothing'
+    Install-ModArchive $pend.archive (Get-DeferredMeta $pend.archive) -OnConflict overwrite | Out-Null; $st = Get-State
+    Check (($st.mods | Where-Object name -eq 'ModP') -and -not ($st.disabled | Where-Object name -eq 'ModP') -and -not ($st.pending | Where-Object { $_.meta.name -eq 'ModP' }) -and (& $cont $shared) -eq 'P') 'T22 choosing turns it on and clears both lists'
+    Disable-InstalledMod 'ModP'; [void](& $runJob 'enable' @{ name = 'ModP' })
+    Remove-InstalledMod 'ModP'
+    Check (-not ((Get-State).pending | Where-Object { $_.meta.name -eq 'ModP' })) 'T22 removing the turned-off mod drops its waiting choice'
+
+    Write-Host '--- T23: after updates a mod keeps its two previous downloads; older ones are deleted (setting)'
+    $zV = New-TestMod 'VerMod' @{ 'archive\pc\mod\ver.archive' = 'v' }
+    foreach ($i in 1..5) { Copy-Item $zV "$dl\ver$i.zip" }
+    foreach ($i in 1..4) { Install-ModArchive "$dl\ver$i.zip" ([ordered]@{ name = 'VerMod'; version = "$i"; source = 'manual' }) | Out-Null }
+    $older = { (@(((Get-State).mods | Where-Object name -eq 'VerMod').older) | ForEach-Object { Split-Path $_ -Leaf }) -join ',' }
+    Check ((& $older) -eq 'ver3.zip,ver2.zip' -and -not (Test-Path "$dl\ver1.zip") -and (Test-Path "$dl\ver2.zip") -and (Test-Path "$dl\ver3.zip")) "T23 the two previous versions stay, the oldest is deleted: $(& $older)"
+    Disable-InstalledMod 'VerMod'; Enable-InstalledMod 'VerMod'
+    Check ((& $older) -eq 'ver3.zip,ver2.zip') 'T23 turning it off and on keeps that list'
+    [void](Save-CpSettings @{ pruneOld = $false })
+    Install-ModArchive "$dl\ver5.zip" ([ordered]@{ name = 'VerMod'; version = '5'; source = 'manual' }) | Out-Null
+    Check ((Test-Path "$dl\ver2.zip") -and (& $older) -eq 'ver4.zip,ver3.zip') 'T23 with the setting off nothing is deleted'
+    [void](Save-CpSettings @{ pruneOld = $true })
+
+    Write-Host '--- T24: profiles: save the mods on now, switch both ways, a removed mod comes back from its download'
+    [void](Save-Profile 'All')
+    Check ((Get-ProfileInUse (Get-State)) -eq 'All') 'T24 a saved profile is in use'
+    Disable-InstalledMod 'ModR1'
+    Check (-not (Get-ProfileInUse (Get-State))) 'T24 after a change no profile is in use'
+    [void](Save-Profile 'NoR1')
+    $sum = @(Get-ProfileSummaries)
+    Check (@(($sum | Where-Object name -eq 'All').on) -contains 'ModR1' -and ($sum | Where-Object name -eq 'NoR1').inUse) 'T24 summaries: All would turn ModR1 on, NoR1 is in use'
+    Remove-InstalledMod 'ModR2'
+    [void](Invoke-Profile 'All')
+    $st = Get-State
+    Check ((Get-ProfileInUse $st) -eq 'All' -and ($st.mods | Where-Object name -eq 'ModR1') -and ($st.mods | Where-Object name -eq 'ModR2')) 'T24 switching to All turns ModR1 on and reinstalls ModR2'
+    [void](Invoke-Profile 'NoR1')
+    Check ((Get-ProfileInUse (Get-State)) -eq 'NoR1' -and ((Get-State).disabled | Where-Object name -eq 'ModR1')) 'T24 switching back turns ModR1 off'
+    Remove-Profile 'NoR1'
+    Check ((@(Get-Profiles | ForEach-Object name) -join ',') -eq 'All') 'T24 a profile can be deleted'
+
+    Write-Host '--- T25: Nexus details: one failed request loses only its 40 mods'
+    $orig = & (Get-Module cpmods) { ${function:Invoke-NexusGql} }
+    & (Get-Module cpmods) { function script:Invoke-NexusGql([string]$Query) { if ($Query -match 'modId: 1\b') { throw 'Nexus down' }; @{ legacyModsByDomain = @{ nodes = @([regex]::Matches($Query, 'modId: (\d+)') | ForEach-Object { @{ modId = [int]$_.Groups[1].Value; name = "m$($_.Groups[1].Value)" } }) } } } }
+    try {
+        $info = Get-NexusModInfo (1..80)
+        Check ($info.Count -eq 40 -and $info[41].name -eq 'm41') "T25 the other request still comes back ($($info.Count))"
+        $threw = try { [void](Get-NexusModInfo 1); $false } catch { $true }
+        Check $threw 'T25 nothing came back at all: the error is passed on'
+    }
+    finally { & (Get-Module cpmods) { param($f) Set-Item function:script:Invoke-NexusGql $f } $orig }
+
+    Write-Host '--- T26: the known-good restore point waits while a job runs'
+    $sh = [hashtable]::Synchronized(@{ cache = [hashtable]::Synchronized(@{}); jobs = [hashtable]::Synchronized(@{ j1 = [hashtable]::Synchronized(@{ id = 'j1'; status = 'running' }) }); cleanDue = @{ result = 'clean'; start = (Get-Date).AddHours(-1).ToString('s'); end = (Get-Date).AddMinutes(-30).ToString('s') } })
+    [void](Get-UiState $sh)
+    Check ([bool]$sh.cleanDue) 'T26 kept for later while a job runs'
+    $sh.jobs.j1.status = 'done'
+    [void](Get-UiState $sh)
+    Check (-not $sh.cleanDue) 'T26 handled once no job runs'
 }
 catch { $script:fails++; Write-Host "FAIL (stopped): $($_.Exception.Message)" -ForegroundColor Red }
 finally {
-    Remove-Module cpsafety, cpinsight, cpmods -ErrorAction SilentlyContinue
+    Remove-Module cpserver, cpsafety, cpinsight, cpmods -ErrorAction SilentlyContinue
     Remove-Item -LiteralPath $Sb -Recurse -Force -ErrorAction SilentlyContinue
     Write-Host ("RESULT: {0} passed, {1} failed" -f $script:passes, $script:fails) -ForegroundColor $(if ($script:fails) { 'Red' } else { 'Green' })
 }

@@ -924,3 +924,6 @@ input.hex-in { width: 100px; font: 13px "Cascadia Mono", Consolas, monospace; }
 /* kind colors darker on white so chips and icons stay readable */
 [data-bg="white"] .k-assets { --kc: #0a7ea0; } [data-bg="white"] .k-xl { --kc: #5b48d6; } [data-bg="white"] .k-script { --kc: #8a7600; } [data-bg="white"] .k-cet { --kc: #13804f; } [data-bg="white"] .k-plugin { --kc: #c2461f; }
 [data-bg="white"] .k-tweak { --kc: #b02f86; } [data-bg="white"] .k-input { --kc: #2f62c7; } [data-bg="white"] .k-config { --kc: #56606c; } [data-bg="white"] .k-fw { --kc: #8a6d12; } [data-bg="white"] .k-docs { --kc: #6b7480; }
+
+/* profiles pane: name field for saving the mods on now */
+.prof-new input { flex: 1; min-width: 200px; height: 32px; }

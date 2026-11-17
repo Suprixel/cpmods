@@ -10,7 +10,8 @@ A simple mod manager for Cyberpunk 2077 on Windows. Find mods on Nexus, click "S
 - **Safety nets.** Restore points of your whole mod setup, copies of your saves before a launch with changed mods, and backups of mod settings (CET mods, Mod Settings, hotkeys).
 - **Play without mods.** One click sets every mod aside for a vanilla launch; they come back when the game closes.
 - **When something breaks.** The Reports page reads the RED4ext, CET and redscript logs and crash reports. Each problem says which other mod is involved and what you can do: update or turn off the mod, open its log, or hide a message you already know about. Troubleshooting turns half of your mods off per launch until it finds the one causing the problem.
-- **Disk space.** How much your mods and cpmods' own data take, the largest mods, and a cleanup of downloads no mod or restore point uses.
+- **Profiles.** Save which mods are on as a named profile (Story, Photo mode...) and switch between them with one click.
+- **Disk space.** How much your mods and cpmods' own data take, the largest mods, and a cleanup of downloads no mod or restore point uses. After an update, a mod's two previous downloads stay so you can go back; older ones are deleted.
 - **Your look.** Yellow, red or your own color, on a matching, grey, black, OLED black, white or custom background.
 - **Load order and conflicts.** A compatibility check, archive load order (who wins a conflict), and a map of every key binding used by the game and your mods.
 - **Share with friends.** One click makes a zip with the app and your mod list (optionally your mod settings).

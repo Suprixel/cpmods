@@ -129,7 +129,7 @@ if (-not (Test-Path -LiteralPath $DataDir) -and (Test-Path -LiteralPath $oldLs))
 
 function Read-Json([string]$Path) { try { if (Test-Path -LiteralPath $Path) { return ([IO.File]::ReadAllText($Path) | ConvertFrom-Json) } } catch { }; $null }
 # hands the resident memory of every WebView2 process of this window back to Windows (our processes only, never the game)
-# Windows frame off: both UI channels draw their own title bar; the strip above the page is the top resize edge
+# Windows frame off: the page draws its own title bar; the strip above the page is the top resize edge
 function global:Set-CpFrame([bool]$On) {
     $W = $global:CpW
     if (-not $W -or -not $global:CpFrameOk) { return }

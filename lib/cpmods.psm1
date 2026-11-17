@@ -112,7 +112,7 @@ function Get-ArchiveEntries([string]$Archive) {
 #region settings / state / queue
 function Get-CpSettings {
     $s = [ordered]@{ patchLabel = '2.5'; patchDate = '2026-10-22'; autoInstall = $true; autoNext = $true; browser = ''; launchMode = 'steam'; reportOnExit = $true; warnRisk = $true
-        askOverwrite = $true; saveBackup = $true; saveKeep = 5; autoRestore = $true
+        askOverwrite = $true; saveBackup = $true; saveKeep = 5; autoRestore = $true; pruneOld = $true
     }
     if (Test-Path -LiteralPath $script:SettingsFile) {
         $j = Read-JsonFile $script:SettingsFile
@@ -130,7 +130,7 @@ function Save-CpSettings($Changes) {
         if (-not $cur.Contains($k)) { continue }
         $v = $Changes[$k]
         if ($k -eq 'patchDate') { [void][datetime]::ParseExact("$v", 'yyyy-MM-dd', [Globalization.CultureInfo]::InvariantCulture); $v = "$v" }
-        elseif ($k -in 'autoInstall', 'autoNext', 'reportOnExit', 'warnRisk', 'askOverwrite', 'saveBackup', 'autoRestore') { $v = [bool]$v }
+        elseif ($k -in 'autoInstall', 'autoNext', 'reportOnExit', 'warnRisk', 'askOverwrite', 'saveBackup', 'autoRestore', 'pruneOld') { $v = [bool]$v }
         elseif ($k -eq 'saveKeep') { $v = [int]$v; if ($v -lt 1 -or $v -gt 30) { throw 'saveKeep must be 1 to 30' } }
         elseif ($k -eq 'launchMode') { $v = "$v"; if ($v -notin 'steam', 'direct') { throw 'launchMode must be steam or direct' } }
         elseif ($k -eq 'browser') { $v = "$v".Trim(); if ($v -and -not (Test-Path -LiteralPath $v -PathType Leaf)) { throw "Browser not found: $v" } }
@@ -554,16 +554,33 @@ function Install-ModArchive {
         if ($merged.Count) { $rec.merged = $merged }
         if ($under.Count) { $rec.under = $under }
         if ($copyError) { $rec.broken = $copyError }
+        # its earlier downloads, newest first: the last two stay for going back (Remove-OldDownloads deletes the rest)
+        $older = [Collections.Generic.List[string]]::new()
+        foreach ($a in @($old.archive) + @($old.older) + @($Meta.older)) { if ($a -and "$a" -ne $Archive -and -not $older.Contains("$a")) { $older.Add("$a") } }
+        if ($older.Count) { $rec.older = @($older | Select-Object -First 2) }
         $s.mods.Add($rec)
         foreach ($k in 'pending', 'failed', 'disabled') {
             foreach ($x in @($s[$k] | Where-Object { $(if ($k -eq 'disabled') { $_.name } else { $_.meta.name }) -eq $Meta.name })) { [void]$s[$k].Remove($x) }
         }
         Save-State $s
         if ($copyError) { throw "Copy failed after $($files.Count) files: $copyError" }
+        if ($older.Count -gt 2 -and (Get-CpSettings).pruneOld) { Remove-OldDownloads $s @($older | Select-Object -Skip 2) }
         Write-Note "Installed $($Meta.name) $($Meta.version) ($($files.Count) files)" Green
         $Meta.name
     }
     finally { Remove-Item -LiteralPath $tmp -Recurse -Force -ErrorAction SilentlyContinue }
+}
+
+# deletes downloads of earlier versions that no mod (on, off or waiting) still uses; only files in Downloads
+function Remove-OldDownloads($S, [string[]]$Paths) {
+    $used = [Collections.Generic.HashSet[string]]::new([StringComparer]::OrdinalIgnoreCase)
+    foreach ($k in 'mods', 'disabled') { foreach ($m in $S[$k]) { foreach ($a in @($m.archive) + @($m.older)) { if ($a) { [void]$used.Add("$a") } } } }
+    foreach ($k in 'pending', 'failed') { foreach ($x in $S[$k]) { if ($x.archive) { [void]$used.Add("$($x.archive)") } } }
+    foreach ($p in $Paths) {
+        if ($used.Contains($p) -or [IO.Path]::GetDirectoryName($p) -ine $script:DlDir -or -not (Test-Path -LiteralPath $p)) { continue }
+        try { Remove-Item -LiteralPath $p -Force; Write-Note "  deleted the old download $([IO.Path]::GetFileName($p))" DarkGray }
+        catch { Write-Note "  could not delete the old download $([IO.Path]::GetFileName($p)) ($($_.Exception.Message))" DarkYellow }
+    }
 }
 
 function Find-InstalledMod($S, [string]$N) {
@@ -579,7 +596,10 @@ function Remove-InstalledMod([string]$Name, [switch]$Purge, [switch]$Force) {
     $d = $s.disabled | Where-Object { $_.name -eq $Name } | Select-Object -First 1
     if ($d) {
         if ($d.parked -and (Test-Path -LiteralPath $d.parked)) { Remove-ToRecycleBin $d.parked -Directory }
-        [void]$s.disabled.Remove($d); Save-State $s; Write-Note "Removed disabled entry $Name" Green; return
+        [void]$s.disabled.Remove($d); Save-State $s
+        # a "waiting for your choice" left by turning it back on would bring it back
+        [void](Remove-Deferred $Name)
+        Write-Note "Removed disabled entry $Name" Green; return
     }
     $m = Find-InstalledMod $s $Name
     Remove-ModCore $s $m -Purge:$Purge
@@ -622,7 +642,7 @@ function Disable-InstalledMod([string]$Name) {
     Remove-ModCore $s $m
     $s.disabled.Add([ordered]@{
             name = $m.name; version = $m.version; source = $m.source; modId = $m.modId; fileId = $m.fileId; fileName = $m.fileName
-            sha256 = $m.sha256; sub = $m.sub; archive = $m.archive; disabledAt = (Get-Date).ToString('s'); files = $was; keepOthers = $m.keepOthers; merged = $m.merged
+            sha256 = $m.sha256; sub = $m.sub; archive = $m.archive; disabledAt = (Get-Date).ToString('s'); files = $was; keepOthers = $m.keepOthers; merged = $m.merged; older = $m.older
         })
     Save-State $s
     Write-Note "Disabled $($m.name)" Green
@@ -660,7 +680,7 @@ function Enable-InstalledMod([string]$Name, [switch]$Ask) {
 
 function Copy-Meta($Src) {
     $o = [ordered]@{}
-    foreach ($k in 'name', 'version', 'source', 'modId', 'fileId', 'fileName', 'sha256', 'sub', 'keepOthers', 'merged') { if ($null -ne $Src[$k]) { $o[$k] = $Src[$k] } }
+    foreach ($k in 'name', 'version', 'source', 'modId', 'fileId', 'fileName', 'sha256', 'sub', 'keepOthers', 'merged', 'older') { if ($null -ne $Src[$k]) { $o[$k] = $Src[$k] } }
     $o
 }
 
@@ -1092,16 +1112,17 @@ function Get-NameSim($Words, [string]$Name) {
     @($w | Where-Object { $c.Contains($_) }).Count / $w.Count
 }
 
-# Nexus details per mod id (40 per request); throws when Nexus does not answer
+# Nexus details per mod id (40 per request); a failed request loses only its 40, and it throws only when nothing came back
 function Get-NexusModInfo([int[]]$Ids, [string]$Fields = 'modId name version updatedAt thumbnailUrl') {
-    $info = @{}
+    $info = @{}; $err = $null
     $Ids = @($Ids | Where-Object { $_ -gt 0 } | Sort-Object -Unique)
     for ($i = 0; $i -lt $Ids.Count; $i += 40) {
         $chunk = $Ids[$i..([Math]::Min($i + 39, $Ids.Count - 1))]
         $list = ($chunk | ForEach-Object { "{gameDomain: `"$($script:NexusGame)`", modId: $_}" }) -join ', '
-        $d = Invoke-NexusGql "{ legacyModsByDomain(ids: [$list], count: 50) { nodes { $Fields } } }"
-        foreach ($n in $d.legacyModsByDomain.nodes) { $info[[int]$n.modId] = $n }
+        try { $d = Invoke-NexusGql "{ legacyModsByDomain(ids: [$list], count: 50) { nodes { $Fields } } }"; foreach ($n in $d.legacyModsByDomain.nodes) { $info[[int]$n.modId] = $n } }
+        catch { if (-not $err) { $err = $_ } }
     }
+    if ($err -and -not $info.Count) { throw $err }
     $info
 }
 

@@ -106,6 +106,10 @@ switch ("$($P.op)") {
 param($Job, $P, $Shared)
 Use-Lock { Invoke-StorageCleanup ([bool]$P.old) }
 '@
+    profile     = @'
+param($Job, $P, $Shared)
+Use-Lock { Invoke-Profile "$($P.name)" $Job }
+'@
 }
 
 function Send-Bytes($Ctx, [byte[]]$Bytes, [string]$Type, [int]$Code = 200) {
@@ -145,7 +149,7 @@ function Send-Gql($Ctx, [string]$Raw, $Shared) {
     $txt = if ($resp.Content -is [byte[]]) { [Text.Encoding]::UTF8.GetString($resp.Content) } else { [string]$resp.Content }
     if ([int]$resp.StatusCode -eq 200 -and $txt -notmatch '"errors"\s*:') {
         # answers count for 5 min: older ones go now, so browsing Discover never piles them up (the cap bounds the rest)
-        foreach ($k in @($Shared.cache.Keys)) { $e = $Shared.cache[$k]; if ("$k".StartsWith('gql-') -and $e -and ([datetime]::UtcNow - $e.t).TotalSeconds -ge 300) { $Shared.cache.Remove($k) } }
+        foreach ($k in @($Shared.cache.Clone().Keys)) { $e = $Shared.cache[$k]; if ("$k".StartsWith('gql-') -and $e -and ([datetime]::UtcNow - $e.t).TotalSeconds -ge 300) { $Shared.cache.Remove($k) } }
         if ($Shared.cache.Count -gt 400) { $Shared.cache.Clear() }
         $Shared.cache[$key] = @{ t = [datetime]::UtcNow; v = $txt }
     }
@@ -197,10 +201,10 @@ function Get-UiStateKey($Shared) {
     $p = Get-CpPaths
     $sb = [Text.StringBuilder]::new()
     $man = Get-Cached $Shared 'manifest' 3600 { "$(([IO.File]::ReadAllText((Join-Path $p.root 'config.json')) | ConvertFrom-Json).steamManifest)" }
-    foreach ($f in (Join-Path $p.state 'mods.json'), (Join-Path $p.state 'settings.json'), (Join-Path $p.state 'bisect.json'), (Join-Path $p.state 'vanilla.json'), (Join-Path $p.state 'nexus.key'), (Join-Path $p.root 'queue.json'), (Join-Path $p.root 'frameworks.json'), $p.downloads, (Join-Path $p.game 'bin\x64\Cyberpunk2077.exe'), $man) {
+    foreach ($f in (Join-Path $p.state 'mods.json'), (Join-Path $p.state 'settings.json'), (Join-Path $p.state 'bisect.json'), (Join-Path $p.state 'vanilla.json'), (Join-Path $p.state 'nexus.key'), (Join-Path $p.state 'profiles.json'), (Join-Path $p.root 'queue.json'), (Join-Path $p.root 'frameworks.json'), $p.downloads, (Join-Path $p.game 'bin\x64\Cyberpunk2077.exe'), $man) {
         if ($f) { [void]$sb.Append([IO.File]::GetLastWriteTimeUtc($f).Ticks).Append('|') }
     }
-    foreach ($j in @($Shared.jobs.Values)) { [void]$sb.Append("$($j.id):$($j.status):$($j.phase):$($j.done):$($j.total):$($j.detail):$($j.error):$($j.next)|") }
+    foreach ($j in @($Shared.jobs.Clone().Values)) { [void]$sb.Append("$($j.id):$($j.status):$($j.phase):$($j.done):$($j.total):$($j.detail):$($j.error):$($j.next)|") }
     [void]$sb.Append((@(Get-GameProcesses | ForEach-Object { $_.ProcessName } | Sort-Object -Unique) -join ',')).Append('|')
     $b = try { Get-BriefCached $Shared } catch { $null }
     [void]$sb.Append((ConvertTo-Json -InputObject $b -Compress -Depth 4)).Append('|')
@@ -283,13 +287,13 @@ function Get-ModInfoCache($Shared, $S) {
     $v
 }
 
-# Launch summary (~15 ms): rebuilt when the RED4ext log folder, the crash folder or the game process change; every 4 s while it runs
+# Launch summary (~15 ms): rebuilt when the RED4ext log folder, the crash folder or the game process change
 function Get-BriefCached($Shared) {
     $g = (Get-CpPaths).game
     $ps = [Diagnostics.Process]::GetProcessesByName('Cyberpunk2077'); $run = $ps.Length -gt 0; foreach ($x in $ps) { $x.Dispose() }
     $k = '{0}|{1}|{2}' -f [IO.File]::GetLastWriteTimeUtc((Join-Path $g 'red4ext\logs')).Ticks, [IO.File]::GetLastWriteTimeUtc((Join-Path $env:LOCALAPPDATA 'REDEngine\ReportQueue')).Ticks, $run
     $c = $Shared.cache['brief']
-    if ($c -and $c.k -eq $k -and (-not $run -or ([datetime]::UtcNow - $c.t).TotalSeconds -lt 4)) { return $c.v }
+    if ($c -and $c.k -eq $k) { return $c.v }
     $v = Get-LaunchBrief
     $Shared.cache['brief'] = @{ k = $k; t = [datetime]::UtcNow; v = $v }
     # saved by Get-UiState (a worker): this also runs on the main loop, which must never wait for the install lock
@@ -333,11 +337,12 @@ function Get-UiState($Shared) {
     }
     $van = Get-VanillaState
     $launch = try { Get-BriefCached $Shared } catch { $null }
-    if ($Shared.cleanDue) { $v = $Shared.cleanDue; $Shared.cleanDue = $null; try { Save-CleanRestorePoint $v } catch { } }
     $failed = foreach ($f in $s.failed) { [ordered]@{ name = $f.meta.name; archive = [IO.Path]::GetFileName("$($f.archive)"); error = $f.error; at = $f.at; modId = $f.meta.modId } }
-    $jobs = foreach ($j in @($Shared.jobs.Values)) {
+    $jobs = foreach ($j in @($Shared.jobs.Clone().Values)) {
         [ordered]@{ id = $j.id; kind = $j.kind; title = $j.title; status = $j.status; phase = $j.phase; total = $j.total; done = $j.done; detail = $j.detail; error = $j.error; next = $j.next; started = $j.started; finished = $j.finished; modId = $j.modId; fileId = $j.fileId }
     }
+    # not while a job runs: it may hold the lock, and its changes must not count as known good (the job's end rebuilds the state)
+    if ($Shared.cleanDue -and -not @($jobs | Where-Object { $_.status -eq 'running' }).Count) { $v = $Shared.cleanDue; $Shared.cleanDue = $null; try { Save-CleanRestorePoint $v } catch { } }
     [ordered]@{
         game       = Get-GameState
         settings   = Get-CpSettings
@@ -354,6 +359,7 @@ function Get-UiState($Shared) {
         browsers   = @(Get-Cached $Shared 'browsers' 600 { @(Get-InstalledBrowsers) })
         paths      = Get-CpPaths
         launch     = $launch
+        profile    = $(try { Get-ProfileInUse $s } catch { $null })
         bisect     = $(try { Get-BisectState } catch { $null })
         vanilla    = $(if ($van) { [ordered]@{ started = $van.started; seen = [bool]$van.gameSeen; parked = @($van.moves | Where-Object { $_.done }).Count } } else { $null })
     }
@@ -415,6 +421,16 @@ function Invoke-CpRequest {
             'POST /api/window' { Request-CpWindow $Shared; Send-Json $Ctx @{ ok = $true } }
             'GET /api/perf' { Send-Json $Ctx (Get-CpPerf $Shared) }
             'GET /api/storage' { Send-Json $Ctx (Get-StorageInfo) }
+            'GET /api/profiles' { Send-Json $Ctx @{ profiles = @(Get-ProfileSummaries) } }
+            'POST /api/profiles' {
+                $n = "$($b.name)"
+                switch ("$($b.op)") {
+                    'save' { $r = Save-Profile $n; Send-Json $Ctx @{ ok = $true; name = $r.name; mods = @($r.mods).Count } }
+                    'delete' { Remove-Profile $n; Send-Json $Ctx @{ ok = $true } }
+                    'apply' { $j = Start-CpJob $Shared 'profile' "Switching to the profile $n" @{ name = $n }; Send-Json $Ctx @{ ok = $true; job = $j.id } }
+                    default { throw "Unknown op $($b.op)" }
+                }
+            }
             'POST /api/storage' {
                 if ("$($b.op)" -ne 'clean') { throw "Unknown op $($b.op)" }
                 $j = Start-CpJob $Shared 'cleanup' 'Freeing disk space' @{ old = [bool]$b.old }
@@ -550,7 +566,7 @@ function Invoke-CpRequest {
                         Write-Note "Deleted download $($b.file)"
                         Send-Json $Ctx @{ ok = $true }
                     }
-                    'clearJobs' { foreach ($k in @($Shared.jobs.Keys)) { if ($Shared.jobs[$k].status -ne 'running') { $Shared.jobs.Remove($k) } }; Send-Json $Ctx @{ ok = $true } }
+                    'clearJobs' { foreach ($k in @($Shared.jobs.Clone().Keys)) { if ($Shared.jobs[$k].status -ne 'running') { $Shared.jobs.Remove($k) } }; Send-Json $Ctx @{ ok = $true } }
                     default { throw "Unknown action $op" }
                 }
             }
@@ -624,22 +640,23 @@ function Invoke-CpRequest {
     }
 }
 
+# shared lists are walked through a copy taken under their lock (Clone, ToArray): other threads add jobs and cache entries meanwhile
 function Clear-CpWorkers($Shared, $Reqs) {
     foreach ($r in @($Reqs)) {
         if ($r.h.IsCompleted) { try { [void]$r.ps.EndInvoke($r.h) } catch { }; $r.ps.Dispose(); [void]$Reqs.Remove($r) }
     }
-    foreach ($w in @($Shared.workers)) {
+    foreach ($w in @($Shared.workers.ToArray())) {
         if ($w.h.IsCompleted) { try { [void]$w.ps.EndInvoke($w.h) } catch { }; $w.ps.Dispose(); $w.rs.Dispose(); $Shared.workers.Remove($w) }
     }
     $cut = [datetime]::UtcNow.AddMinutes(-30)
-    foreach ($k in @($Shared.jobs.Keys)) {
+    foreach ($k in @($Shared.jobs.Clone().Keys)) {
         $j = $Shared.jobs[$k]
         if ($j.status -ne 'running' -and $j.finished -and [datetime]::Parse($j.finished).ToUniversalTime() -lt $cut) { $Shared.jobs.Remove($k) }
     }
 }
 
 function Test-CpShouldExit($Shared) {
-    if (@($Shared.jobs.Values | Where-Object { $_.status -eq 'running' }).Count) { return $false }
+    if (@($Shared.jobs.Clone().Values | Where-Object { $_.status -eq 'running' }).Count) { return $false }
     if ($Shared.stop) { return $true }
     # the built-in window may be suspended (minimized) and silent: it ends the server when it closes
     if ($Shared.winOpen) { return $false }

@@ -1016,6 +1016,7 @@
         <div class="ph-actions">
           <button class="btn" data-act="lib-updates"${S.lib.checking ? ' disabled' : ''}>${S.lib.checking ? '<span class="spin"></span>Checking' : ic('refresh') + 'Check for updates'}</button>
           <button class="btn" data-act="tool" data-tool="compat">${ic('shield')}Compatibility</button>
+          <button class="btn" data-act="tool" data-tool="profiles" title="Named sets of mods to switch between">${ic('collections')}${S.st.profile ? `Profile: ${h(S.st.profile)}` : 'Profiles'}</button>
           <button class="btn" data-act="tool" data-tool="backups" title="Restore points, save copies and mod settings">${ic('history')}Backups</button>
           <button class="icon-btn" data-act="lib-more" title="More tools" aria-label="More tools">${ic('more')}</button>
         </div></div></header>
@@ -1026,6 +1027,9 @@
   function renderLibBody() {
     const body = $('#lib-body');
     if (!body) return;
+    // the header button names the profile in use (the header itself is not redrawn by state changes)
+    const pb = $('#page [data-tool="profiles"]');
+    if (pb) setHtml(pb, ic('collections') + (S.st.profile ? `Profile: ${h(S.st.profile)}` : 'Profiles'));
     const all = libItems(), L = S.lib;
     const n = { all: all.length, mods: all.filter(m => !m.fw).length, fw: all.filter(m => m.fw).length, off: all.filter(m => !m.on).length, upd: all.filter(hasUpdate).length, nw: all.filter(isNewSinceLaunch).length, iss: all.filter(m => modIssues(m.name).some(i => i.risk === 'high' || i.risk === 'medium')).length };
     const segs = [['all', 'All', n.all], ['mods', 'Mods', n.mods], ['fw', 'Frameworks', n.fw], ['off', 'Disabled', n.off], ['upd', 'Updates', L.updates ? n.upd : '?'], ['new', 'New', n.nw], ['issues', 'Conflicts', L.compat && !L.compat.error ? n.iss : '?']];
@@ -1549,7 +1553,7 @@
         <div class="du-head"><span><b>${fmtSize(total)}</b> used by cpmods itself</span></div>
         <div class="du-list">${parts.map(([l, u, t]) => `<div class="du-row"${t ? ` title="${h(t)}"` : ''}><span class="du-l">${h(l)}</span>${bar(u.bytes, top)}<span class="du-n">${fmtSize(u.bytes)}</span></div>`).join('')}</div>
         <div class="perf-now du-drives">${drives}</div>
-        <div class="du-clean">${free || sp.old.length ? `<span>${sp.free.length ? `<b>${plural(sp.free.length, 'download')}</b> (${fmtSize(sp.freeBytes)}) no mod uses any more.` : 'Every download is used by a mod.'}${sp.old.length ? ` ${plural(sp.old.length, 'older version')} (${fmtSize(sp.oldBytes)}) only restore points use.` : ''}</span><button class="btn sm" data-act="disk-clean">Free space...</button>` : '<span class="dim small">Nothing to clean up: every download belongs to a mod.</span>'}<button class="btn sm ghost" data-act="disk-refresh">Measure again</button></div>
+        <div class="du-clean">${free || sp.old.length ? `<span>${sp.free.length ? `<b>${plural(sp.free.length, 'download')}</b> (${fmtSize(sp.freeBytes)}) no mod uses any more.` : 'Every download is used by a mod.'}${sp.old.length ? ` ${plural(sp.old.length, 'older version')} (${fmtSize(sp.oldBytes)}) kept for going back.` : ''}</span><button class="btn sm" data-act="disk-clean">Free space...</button>` : '<span class="dim small">Nothing to clean up: every download belongs to a mod.</span>'}<button class="btn sm ghost" data-act="disk-refresh">Measure again</button></div>
       </div>`;
   }
   async function loadDisk() {
@@ -1562,7 +1566,7 @@
     if (!sp) return;
     const list = sp.free.slice(0, 8).map(f => `<li>${h(f.file)} <span class="dim">${fmtSize(f.size)}</span></li>`).join('') + (sp.free.length > 8 ? `<li class="dim">and ${sp.free.length - 8} more</li>` : '');
     const body = `${sp.free.length ? `These downloads are not used by any mod (installed, off or waiting) or restore point:<ul class="ask-list">${list}</ul>` : 'No download is unused right now.'}
-      ${sp.old.length ? `<label class="check-row"><input type="checkbox" class="check" data-pick="old"> <span>Also delete ${plural(sp.old.length, 'older version')} (${fmtSize(sp.oldBytes)}) that only restore points use. Going back to those points then cannot bring those versions back.</span></label>` : ''}
+      ${sp.old.length ? `<label class="check-row"><input type="checkbox" class="check" data-pick="old"> <span>Also delete ${plural(sp.old.length, 'older version')} (${fmtSize(sp.oldBytes)}) kept for going back (by restore points, or as a mod's previous download). Going back can then not bring those versions back.</span></label>` : ''}
       <p class="dim small">Temporary files left by interrupted installs go too. Mods, saves and backups are not touched.</p>`;
     const r = await choose({ title: 'Free disk space?', body, options: [{ v: 'go', label: 'Delete', kind: 'danger' }] });
     if (!r) return;
@@ -1600,6 +1604,7 @@
     const st = S.st, s = st.settings;
     if (k === 'downloads') return srow('Install automatically', 'Install each file as soon as it finishes downloading.', ssw('autoInstall', s.autoInstall, 'Install automatically'))
       + srow('Ask when two mods have the same file', 'On: you choose (combine both, use the new copy, or keep the old one). Off: no question. Both mods install, the one installed last is used, and the other\'s copy is kept underneath: it comes back if you remove the newer mod.', ssw('askOverwrite', s.askOverwrite !== false, 'Ask when two mods have the same file'))
+      + srow('Delete older downloads after updates', 'When a mod updates, its two previous downloads stay so you can go back; older ones are deleted. A restore point that needs a deleted version can no longer bring it back.', ssw('pruneOld', s.pruneOld !== false, 'Delete older downloads after updates'))
       + srow('Continue the queue', 'Open the next queued download page by itself.', ssw('autoNext', s.autoNext, 'Continue the queue'))
       + srow('Open links in', 'Pages open in this browser and come to the front.', `<select id="s-browser" aria-label="Open links in">${opt([['', 'Windows default']].concat((st.browsers || []).map(b => [b.path, b.name])), s.browser || '')}</select>`);
     if (k === 'look') return appearanceHtml();
@@ -1673,7 +1678,7 @@
   function paneTitle(p) {
     if (p.kind === 'mod') return p.data ? decode(p.data.mod.name) : 'Mod';
     if (p.kind === 'col') return p.data ? decode(p.data.name) : 'Collection';
-    return { compat: 'Compatibility', discover: 'Find existing mods', gamelog: 'Game logs', log: 'Activity log', files: p.name || 'Files', crash: 'Crash report', preview: p.file || 'Archive', bisect: 'Find the problem mod', backups: 'Backups', keys: 'Key bindings' }[p.kind] || 'Details';
+    return { profiles: 'Profiles', compat: 'Compatibility', discover: 'Find existing mods', gamelog: 'Game logs', log: 'Activity log', files: p.name || 'Files', crash: 'Crash report', preview: p.file || 'Archive', bisect: 'Find the problem mod', backups: 'Backups', keys: 'Key bindings' }[p.kind] || 'Details';
   }
   function renderPane(reset) {
     const box = $('#paneBox'), el = $('#pane'), strip = $('#paneStrip');
@@ -1723,6 +1728,7 @@
     if (p.kind === 'preview') return previewPane(p);
     if (p.kind === 'bisect') return bisectPane(p);
     if (p.kind === 'backups') return backupsPane(p);
+    if (p.kind === 'profiles') return profilesPane(p);
     if (p.kind === 'keys') return keysPane(p);
     return '';
   }
@@ -2055,6 +2061,7 @@
     if (tool === 'gamelog') return runTool({ kind: 'gamelog' }, '/api/check', null, mode);
     if (tool === 'log') return runTool({ kind: 'log' }, '/api/log', null, mode);
     if (tool === 'backups') return runTool({ kind: 'backups', tab: S.pane && S.pane.kind === 'backups' ? S.pane.tab : 'points', plans: {} }, '/api/backups', null, mode);
+    if (tool === 'profiles') return runTool({ kind: 'profiles' }, '/api/profiles', null, mode);
     if (tool === 'keys') return runTool({ kind: 'keys' }, '/api/keymap', null, mode);
   }
   async function runTool(p, url, after, mode) {
@@ -2549,8 +2556,58 @@
     action({ op: 'install', archive: p.archive, name: p.name, conflict: r.v }, `Installing ${p.name}`);
   }
 
+  // ---------- profiles: named sets of mods to switch between ----------
+  async function reloadProfiles() {
+    const p = S.pane;
+    if (!p || p.kind !== 'profiles') return;
+    try { p.data = await api('/api/profiles'); p.error = null; } catch (e) { p.error = e.message; }
+    if (S.pane === p) renderPane();
+  }
+  const profChanges = x => [[arr(x.off).length, 'off'], [arr(x.on).length, 'on'], [arr(x.install).length, 'reinstalled']].filter(c => c[0]).map(c => `${c[0]} ${c[1]}`).join(', ');
+  function profilesPane(p) {
+    return toolShell(p, 'Profiles', 'A profile remembers which mods are on. Switching turns mods off and on, and reinstalls ones you removed from their download. Versions stay as they are, frameworks stay on, and cpmods makes a restore point first.', () => {
+      const list = arr(p.data.profiles), busy = S.st.jobs.some(j => j.kind === 'profile' && j.status === 'running'), run = S.st.game.running;
+      const save = `<div class="keyrow prof-new"><input type="text" id="prof-name" maxlength="60" spellcheck="false" placeholder="A name for the mods on now, like Story or Photo mode" aria-label="Profile name"><button class="btn sm primary" data-act="prof-save">${ic('plus')}Save as a profile</button></div>`;
+      if (!list.length) return save + '<div class="card"><div class="empty"><h3>No profiles yet</h3>Save the mods that are on now as a profile. Change your mods, save another one, then switch between them with one click.</div></div>';
+      return save + `<div class="card"><div class="list">${list.map(x => {
+        const ch = profChanges(x), miss = arr(x.missing).length;
+        const sub = x.inUse ? '<span class="pill ok">In use</span>' : `<span>${ch ? 'Switching: ' + h(ch) : 'Nothing to switch'}${miss ? ` &middot; ${plural(miss, 'mod')} cannot come back` : ''}</span>`;
+        return `<div class="li bk-row"><span class="st-ic ${x.inUse ? 'ok' : 'muted'}">${ic(x.inUse ? 'check' : 'collections')}</span><div class="li-main"><div class="li-title"><span class="t">${h(x.name)}</span></div><div class="li-sub"><span>${plural(x.mods, 'mod')} on</span><span>saved ${h(fmtWhen(x.at))}</span>${sub}</div></div>
+          <div class="li-acts">${x.inUse ? '' : `<button class="btn sm primary" data-act="prof-apply" data-name="${h(x.name)}"${busy || run || !ch ? ' disabled' : ''}${run ? ' title="Close the game first"' : ''}>Switch</button>`}<button class="btn sm ghost" data-act="prof-update" data-name="${h(x.name)}" title="Save the mods that are on now into this profile">Update</button><button class="icon-btn" data-act="prof-del" data-name="${h(x.name)}" title="Delete this profile" aria-label="Delete the profile ${h(x.name)}">${ic('x')}</button></div></div>`;
+      }).join('')}</div></div>${busy ? '<div class="helper"><span class="spin"></span> Switching mods; progress shows in the bar at the bottom.</div>' : ''}`;
+    });
+  }
+  async function profSave(name, replace) {
+    name = String(name || '').trim();
+    if (!name) { toast('Name the profile first', 'For example Story or Photo mode.', 'warn', 4000); return; }
+    const p = S.pane, exists = p && p.data && arr(p.data.profiles).some(x => x.name === name);
+    if ((exists || replace) && !await ask({ title: `Update ${name}?`, body: `<b>${h(name)}</b> then holds the mods that are on now (${plural(stMods().length, 'mod')}).`, ok: 'Update' })) return;
+    try {
+      const r = await api('/api/profiles', { op: 'save', name });
+      toast(`Profile ${r.name} saved`, plural(r.mods, 'mod') + ' on.', 'ok', 4000);
+      const i = $('#prof-name'); if (i) i.value = '';
+      await reloadProfiles(); refreshState();
+    } catch (e) { toast('Could not save the profile', e.message, 'bad', 8000); }
+  }
+  async function profApply(name) {
+    const x = arr(S.pane && S.pane.data && S.pane.data.profiles).find(y => y.name === name);
+    if (!x) return;
+    if (S.st.game.running) { toast('Close the game first', 'Mods cannot change while it runs.', 'warn', 5000); return; }
+    const body = planGrp('Turned off', arr(x.off)) + planGrp('Turned back on', arr(x.on)) + planGrp('Installed again', arr(x.install)) + planGrp('Cannot come back', arr(x.missing).map(m => `${m.name}: ${m.why}`), 'bad-t') + '<p class="dim small">cpmods makes a restore point first, so you can go back.</p>';
+    if (!await ask({ title: `Switch to ${name}?`, body, ok: 'Switch' })) return;
+    try { await api('/api/profiles', { op: 'apply', name }); toast(`Switching to ${name}`, 'Progress shows in the bar at the bottom.', '', 4000); await refreshState(); if (S.pane && S.pane.kind === 'profiles') renderPane(); }
+    catch (e) { toast('Could not switch', e.message, 'bad', 10000); }
+  }
+  async function profDelete(name) {
+    if (!await ask({ title: `Delete the profile ${name}?`, body: 'Only the profile goes. Your mods stay as they are.', ok: 'Delete', danger: true })) return;
+    try { await api('/api/profiles', { op: 'delete', name }); await reloadProfiles(); refreshState(); }
+    catch (e) { toast('Could not delete it', e.message, 'bad', 8000); }
+  }
+  // groups of mod names in a "what changes" list (restore points, profiles)
+  const planGrp = (title, items, cls) => items.length ? `<div class="bk-grp"><b class="${cls || ''}">${title}</b><div class="mchips">${items.map(t => `<span class="mchip sm static">${h(t)}</span>`).join('')}</div></div>` : '';
+
   // ---------- backups: restore points, save copies, mod settings ----------
-  const POINT_KIND = { clean: ['ok', 'check', 'Known good'], auto: ['muted', 'history', 'Automatic'], manual: ['info', 'pin', 'Made by you'] };
+  const POINT_KIND ={ clean: ['ok', 'check', 'Known good'], auto: ['muted', 'history', 'Automatic'], manual: ['info', 'pin', 'Made by you'] };
   async function reloadBackups() {
     const p = S.pane;
     if (!p || p.kind !== 'backups') return;
@@ -2579,7 +2636,7 @@
     const pl = p.plans && p.plans[x.id];
     if (!pl) return '<div class="bk-plan"><span class="spin"></span> Working out what would change</div>';
     if (pl.error) return `<div class="bk-plan err">${h(pl.error)}</div>`;
-    const grp = (title, items, cls) => items.length ? `<div class="bk-grp"><b class="${cls || ''}">${title}</b><div class="mchips">${items.map(t => `<span class="mchip sm static">${h(t)}</span>`).join('')}</div></div>` : '';
+    const grp = planGrp;
     const n = arr(pl.off).length + arr(pl.on).length + arr(pl.install).length + arr(pl.version).length;
     return `<div class="bk-plan">${!n && !arr(pl.missing).length ? '<p class="dim small" style="margin:0">Nothing to change: your mods are already like this.</p>'
       : grp('Turned off', arr(pl.off)) + grp('Turned back on', arr(pl.on)) + grp('Installed again', arr(pl.install)) + grp('Back to an older version', arr(pl.version).map(v => `${v.name} ${v.from} → ${v.to}`)) + grp('Cannot come back', arr(pl.missing).map(m => `${m.name}: ${m.why}`), 'bad-t')}
@@ -2785,6 +2842,10 @@
     'open-log': t => sysQuiet({ op: 'openFile', path: t.dataset.path }, 'Could not open the log'),
     'game-at': t => openGameAt(t.dataset.k),
     'disk-clean': () => diskClean(),
+    'prof-save': () => profSave(($('#prof-name') || {}).value),
+    'prof-update': t => profSave(t.dataset.name, true),
+    'prof-apply': t => profApply(t.dataset.name),
+    'prof-del': t => profDelete(t.dataset.name),
     'disk-refresh': () => { S.disk = null; const el = $('#disk-now'); if (el) el.innerHTML = diskHtml(); loadDisk(); },
     'row-menu': t => {
       const m = findItem(t.dataset.name);
@@ -2982,6 +3043,7 @@
     if (ev.key === 'Escape') { if (!$('#menu').hidden) { closeMenu(); return; } if (S.pane) { closePane(); return; } }
     if (ev.key === 'Enter' && ev.target.matches('[data-act][tabindex]')) { ev.preventDefault(); ev.target.click(); return; }
     if (ev.key === 'Enter' && ev.target.id === 's-key') { ev.preventDefault(); saveKey(); return; }
+    if (ev.key === 'Enter' && ev.target.id === 'prof-name') { ev.preventDefault(); profSave(ev.target.value); return; }
     if ((ev.key === 'b' || ev.key === 'B') && (ev.ctrlKey || ev.metaKey) && !ev.altKey && !typing()) { ev.preventDefault(); toggleSide(); return; }
     if (ev.key === '/' && !typing()) { const s = $('#b-q') || $('#c-q') || $('#lib-q') || $('#dl-q'); if (s) { ev.preventDefault(); s.focus(); } }
     // color wheels: left/right = color, up/down = strength
@@ -3063,6 +3125,7 @@
         else toast(j.title, j.error || 'Failed', 'bad', 14000);
         if (['restore', 'saves', 'vanilla'].includes(j.kind)) reloadBackups();
         if (j.kind === 'cleanup' || (j.kind === 'saves' && $('#disk-now'))) loadDisk();
+        if (j.kind === 'profile') reloadProfiles();
       }
     }
     S.jobsSeen = next;
@@ -3072,7 +3135,7 @@
     return JSON.stringify([st.mods.map(m => [m.name, m.version, m.fileId, m.fileCount, m.broken, m.size]), st.disabled.map(d => d.name), st.pending.map(p => p.name),
       st.failed.map(f => [f.name, f.error]), st.queue.map(q => [q.fileId, q.done]), st.downloads.map(d => [d.file, d.status]), st.settings, st.game, st.key, st.handler, (st.browsers || []).length,
       lt ? [lt.log, lt.result, lt.lastCrash, lt.running] : null, bs ? [bs.round, bs.phase, bs.stepAt, (bs.off || []).length, (bs.errors || []).length] : null, st.vanilla ? [st.vanilla.seen, st.vanilla.parked] : null, needChoice().length,
-      st.jobs.some(j => j.kind === 'bisect' && j.status === 'running')]);
+      st.jobs.some(j => j.kind === 'bisect' && j.status === 'running'), st.profile]);
   }
   function onState(st) {
     S.st = st; S.offline = false;

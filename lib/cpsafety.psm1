@@ -70,20 +70,19 @@ function Save-CleanRestorePoint($Brief) {
     [void](Save-RestorePoint 'clean' 'Your mods at a launch that closed normally' $Brief.start)
 }
 
-# what going back to a point changes; frameworks are never switched off
-function Get-RestorePlan([string]$Id) {
-    $p = @(Get-RestorePoints) | Where-Object { $_.id -eq $Id } | Select-Object -First 1
-    if (-not $p) { throw 'That restore point no longer exists' }
+# what switching to a saved setup ($Mods: setup items) changes; frameworks are never switched off.
+# -SameVersions (profiles): only on, off and reinstalls; the versions installed now stay
+function Get-SetupPlan($Mods, [switch]$SameVersions) {
     $fw = @(Get-Frameworks | ForEach-Object { "$($_.name)" })
     $now = @{}; foreach ($x in Get-SetupItems (Get-State)) { $now[$x.name] = $x }
-    $then = @{}; foreach ($x in @($p.mods)) { $then[$x.name] = $x }
-    $plan = [ordered]@{ id = $p.id; at = $p.at; label = $p.label; kind = $p.kind; off = @(); on = @(); install = @(); version = @(); missing = @(); same = 0 }
+    $then = @{}; foreach ($x in @($Mods)) { $then[$x.name] = $x }
+    $plan = [ordered]@{ off = @(); on = @(); install = @(); version = @(); missing = @(); same = 0 }
     $has = { param($t) [bool]($t.archive -and (Test-Path -LiteralPath $t.archive)) }
     foreach ($n in @($now.Keys | Sort-Object)) {
         $c = $now[$n]; $t = $then[$n]
         $isFw = $fw -contains $n -or "$($c.source)" -like 'github:*'
         if (-not $t) { if ($c.on -and -not $isFw) { $plan.off += $n }; continue }
-        if ("$($c.fileId)|$($c.version)" -ne "$($t.fileId)|$($t.version)") {
+        if (-not $SameVersions -and "$($c.fileId)|$($c.version)" -ne "$($t.fileId)|$($t.version)") {
             if (-not $t.on) { if ($c.on -and -not $isFw) { $plan.off += $n } }
             elseif (& $has $t) { $plan.version += [ordered]@{ name = $n; from = $c.version; to = $t.version } }
             else { $plan.missing += [ordered]@{ name = $n; why = "version $($t.version) is no longer in Downloads" } }
@@ -100,13 +99,31 @@ function Get-RestorePlan([string]$Id) {
     }
     $plan
 }
+# what going back to a point changes
+function Get-RestorePlan([string]$Id) {
+    $p = @(Get-RestorePoints) | Where-Object { $_.id -eq $Id } | Select-Object -First 1
+    if (-not $p) { throw 'That restore point no longer exists' }
+    $plan = [ordered]@{ id = $p.id; at = $p.at; label = $p.label; kind = $p.kind }
+    $sp = Get-SetupPlan $p.mods
+    foreach ($k in $sp.Keys) { $plan[$k] = $sp[$k] }
+    $plan
+}
 
 function Invoke-RestorePoint([string]$Id, $Job) {
     Assert-GameReady
     $plan = Get-RestorePlan $Id
     $p = @(Get-RestorePoints) | Where-Object { $_.id -eq $Id } | Select-Object -First 1
-    $then = @{}; foreach ($x in @($p.mods)) { $then[$x.name] = $x }
     [void](Save-RestorePoint 'auto' "Before going back to $(([datetime]$p.at).ToString('d MMM HH:mm', [Globalization.CultureInfo]::InvariantCulture))")
+    $r = Invoke-SetupPlan $plan $p.mods $Job
+    $msg = "Went back: $($r.done) change(s)"
+    if ($plan.missing.Count) { $msg += "; $($plan.missing.Count) mod(s) could not come back" }
+    if ($r.fail.Count) { $msg += ". Problems: $($r.fail -join '; ')" }
+    Write-Note $msg
+    $msg
+}
+# switches mods off and on and installs from the saved items, in that order; one failing mod does not stop the others
+function Invoke-SetupPlan($Plan, $Mods, $Job) {
+    $then = @{}; foreach ($x in @($Mods)) { $then[$x.name] = $x }
     $steps = @(@($plan.off | ForEach-Object { @{ op = 'off'; name = $_ } }) + @($plan.on | ForEach-Object { @{ op = 'on'; name = $_ } }) +
         @($plan.install | ForEach-Object { @{ op = 'install'; name = $_ } }) + @($plan.version | ForEach-Object { @{ op = 'install'; name = $_.name } }))
     $fail = [Collections.Generic.List[string]]::new()
@@ -124,11 +141,7 @@ function Invoke-RestorePoint([string]$Id, $Job) {
         $i++
     }
     if ($Job) { $Job.done = $i }
-    $msg = "Went back: $($steps.Count - $fail.Count) change(s)"
-    if ($plan.missing.Count) { $msg += "; $($plan.missing.Count) mod(s) could not come back" }
-    if ($fail.Count) { $msg += ". Problems: $($fail -join '; ')" }
-    Write-Note $msg
-    $msg
+    @{ done = $steps.Count - $fail.Count; fail = $fail }
 }
 
 # list for the UI: points without their mod lists, with what differs from now
@@ -141,6 +154,53 @@ function Get-RestoreSummaries {
             $changed = @($then.Keys | Where-Object { $now[$_] -and "$($now[$_].fileId)|$($now[$_].version)" -ne "$($then[$_].fileId)|$($then[$_].version)" }).Count
             [ordered]@{ id = $p.id; at = $p.at; kind = $p.kind; label = $p.label; launch = $p.launch; mods = @($p.mods | Where-Object { $_.on }).Count; added = $added; gone = $gone; changed = $changed }
         })
+}
+#endregion
+
+#region profiles: named sets of mods that are on; switching keeps the versions installed now and never turns frameworks off
+function Get-ProfileFile { Join-Path (Get-CpPaths).state 'profiles.json' }
+function Get-Profiles { $f = Get-ProfileFile; if (Test-Path -LiteralPath $f) { @(Read-JsonFile $f | Where-Object { $_ }) } else { @() } }
+function Save-Profile([string]$Name) {
+    $Name = "$Name".Trim()
+    if (-not $Name -or $Name.Length -gt 60) { throw 'Give the profile a name of 1 to 60 characters' }
+    Use-Lock {
+        $p = [ordered]@{ name = $Name; at = (Get-Date).ToString('s'); mods = @(Get-SetupItems (Get-State) | Where-Object { $_.on }) }
+        Write-JsonFile (Get-ProfileFile) @(@(Get-Profiles | Where-Object { $_.name -ne $Name }) + $p | Sort-Object { $_.name })
+        Write-Note "Profile saved: $Name ($(@($p.mods).Count) mods on)"
+        $p
+    }
+}
+function Remove-Profile([string]$Name) {
+    Use-Lock { Write-JsonFile (Get-ProfileFile) @(Get-Profiles | Where-Object { $_.name -ne $Name }) }
+}
+# the profile whose mods are exactly the ones on now (frameworks left out), or $null
+function Get-ProfileInUse($S) {
+    $fw = @(Get-Frameworks | ForEach-Object { "$($_.name)" })
+    $key = { param($items) @($items | Where-Object { $_ -and $fw -notcontains $_.name -and "$($_.source)" -notlike 'github:*' } | ForEach-Object { "$($_.name)" } | Sort-Object -Unique) -join "`n" }
+    $now = & $key $S.mods
+    foreach ($p in Get-Profiles) { if ((& $key @($p.mods)) -ceq $now) { return $p.name } }
+    $null
+}
+function Get-ProfileSummaries {
+    $use = Get-ProfileInUse (Get-State)
+    @(foreach ($p in Get-Profiles) {
+            $pl = Get-SetupPlan $p.mods -SameVersions
+            [ordered]@{ name = $p.name; at = $p.at; mods = @($p.mods).Count; inUse = $p.name -eq $use; off = @($pl.off); on = @($pl.on); install = @($pl.install); missing = @($pl.missing) }
+        })
+}
+function Invoke-Profile([string]$Name, $Job) {
+    Assert-GameReady
+    if (Get-BisectState) { throw 'Troubleshooting is running: finish it first, then switch profiles' }
+    $p = @(Get-Profiles) | Where-Object { $_.name -eq $Name } | Select-Object -First 1
+    if (-not $p) { throw 'That profile no longer exists' }
+    $plan = Get-SetupPlan $p.mods -SameVersions
+    [void](Save-RestorePoint 'auto' "Before switching to the profile $Name")
+    $r = Invoke-SetupPlan $plan $p.mods $Job
+    $msg = "Switched to $($Name): $($r.done) change(s)"
+    if ($plan.missing.Count) { $msg += "; $($plan.missing.Count) mod(s) could not come back" }
+    if ($r.fail.Count) { $msg += ". Problems: $($r.fail -join '; ')" }
+    Write-Note $msg
+    $msg
 }
 #endregion
 
@@ -600,12 +660,14 @@ function Get-DirUse([string]$Path) {
     [ordered]@{ bytes = $b; files = $n }
 }
 # downloads a cleanup may delete: used by no mod (installed, off or waiting), not 30 minutes old (an install may be about
-# to start), and with -Old also the ones only restore points still use (those points can then not bring that version back)
+# to start), and with -Old also the older versions kept for going back (restore points, the two previous downloads of a mod)
 function Get-SpareDownloads([switch]$Old) {
     $pts = [Collections.Generic.HashSet[string]]::new([StringComparer]::OrdinalIgnoreCase)
     foreach ($p in Get-RestorePoints) { foreach ($m in @($p.mods)) { if ($m.archive) { [void]$pts.Add([IO.Path]::GetFileName("$($m.archive)")) } } }
+    $s = Get-State
+    foreach ($m in @($s.mods) + @($s.disabled)) { foreach ($o in @($m.older)) { if ($o) { [void]$pts.Add([IO.Path]::GetFileName("$o")) } } }
     $cut = (Get-Date).AddMinutes(-30)
-    foreach ($d in @(Get-DownloadsInfo)) {
+    foreach ($d in @(Get-DownloadsInfo $s)) {
         if ($d.status -ne 'unused' -or [datetime]$d.date -gt $cut) { continue }
         $d.points = $pts.Contains($d.file)
         if ($Old -or -not $d.points) { $d }

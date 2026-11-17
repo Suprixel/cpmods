@@ -893,7 +893,8 @@ function Get-LaunchReport {
     $endDetail = switch ($res.result) {
         'clean' { "After $([Math]::Round($res.seconds / 60, 1)) min" }
         'crash' { "$($crash.when)$(if ($crash.stage) { " (stage: $($crash.stage))" }) after $($crash.uptime) s" }
-        'running' { "Started $([Math]::Round($res.seconds / 60, 1)) min ago" }
+        # a clock time: the report is not rebuilt while the game runs, so a duration would stand still
+        'running' { "Running since $($start.ToString('HH:mm'))" }
         default { 'The log stops without a shutdown and there is no crash report' }
     }
     $stg.Add([ordered]@{ key = 'end'; title = $endTitle; status = $(switch ($res.result) { 'clean' { 'ok' } 'crash' { 'bad' } 'running' { 'run' } default { 'warn' } }); detail = $endDetail })
