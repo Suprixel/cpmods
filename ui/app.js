@@ -1250,7 +1250,7 @@
       const ph = j.status === 'running' ? (j.phase === 'downloading' && j.total ? `${fmtSize(j.done)} of ${fmtSize(j.total)} (${pct}%)` : (j.phase || 'working')) : j.status === 'done' ? 'Finished' : 'Failed';
       const lead = j.status === 'running' ? '<span class="spin"></span>' : j.status === 'done' ? `<span style="color:var(--ok)">${ic('check')}</span>` : `<span style="color:var(--bad)">${ic('alert')}</span>`;
       const click = j.modId ? ` click" data-act="open-mod" data-id="${+j.modId}" data-sel="mod:${+j.modId}" tabindex="0" title="Open the mod` : '';
-      return `<div class="li${click}">${lead}<div class="li-main"><div class="li-title"><span class="t">${h(j.title)}</span>${j.finished ? `<span class="ver">${h(fmtTime(j.finished))}</span>` : ''}</div><div class="li-sub"><span>${h(ph)}</span>${j.detail ? `<span>${h(j.detail)}</span>` : ''}${j.error ? `<span style="color:var(--bad)">${h(j.error)}</span>` : ''}${j.next ? `<span>next page opened: ${h(j.next)}</span>` : ''}</div>${j.status === 'running' ? `<div class="progress${pct == null ? ' ind' : ''}"><div style="width:${pct || 0}%"></div></div>` : ''}</div>${j.modId ? `<span class="li-go">${ic('fwd')}</span>` : ''}</div>`;
+      return `<div class="li${click}">${lead}<div class="li-main"><div class="li-title"><span class="t">${h(j.title)}</span>${j.finished ? `<span class="ver">${h(fmtTime(j.finished))}</span>` : ''}</div><div class="li-sub"><span>${h(ph)}</span>${j.detail ? `<span>${h(j.detail)}</span>` : ''}${j.error ? `<span style="color:var(--bad)">${h(j.error)}</span>` : ''}${j.next ? `<span>next page opened: ${h(j.next)}</span>` : ''}</div>${j.status === 'running' ? `<div class="progress${pct == null ? ' ind' : ''}"><div style="width:${pct || 0}%"></div></div>` : ''}</div>${j.status === 'running' && j.phase === 'downloading' ? `<button class="btn sm ghost" data-act="job-cancel" data-id="${h(j.id)}">${j.cancel ? 'Cancelling...' : 'Cancel'}</button>` : ''}${j.modId ? `<span class="li-go">${ic('fwd')}</span>` : ''}</div>`;
     }).join('') + '</div>';
   }
   function failRow(f) {
@@ -2916,6 +2916,7 @@
     'queue-skip': t => queueOp({ op: 'skip', fileId: +t.dataset.file }),
     'queue-remove': t => queueOp({ op: 'remove', fileId: +t.dataset.file }),
     'jobs-clear': () => action({ op: 'clearJobs' }),
+    'job-cancel': (t) => action({ op: 'cancelJob', id: t.dataset.id }),
     'dl-arch': t => { S.dl.arch = t.dataset.v; savePrefs(); renderDlBody(); },
     'dl-done': () => { S.dl.showDone = !S.dl.showDone; renderDlBody(); },
     'variant': t => loadVariant(t.dataset.archive, t.dataset.name),

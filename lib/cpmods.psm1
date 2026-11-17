@@ -955,7 +955,18 @@ function Save-UrlToFile([string]$Url, [string]$OutFile, $Job) {
         try {
             $buf = [byte[]]::new(1MB)
             $sum = [long]0
-            while (($n = $in.Read($buf, 0, $buf.Length)) -gt 0) { $out.Write($buf, 0, $n); $sum += $n; if ($Job) { $Job.done = $sum } }
+            # a stalled connection never ends a plain Read: wait in steps, stop on Cancel or 60 s without data
+            $cts = [Threading.CancellationTokenSource]::new()
+            while ($true) {
+                $t = $in.ReadAsync($buf, 0, $buf.Length, $cts.Token); $idle = [Diagnostics.Stopwatch]::StartNew()
+                while (-not $t.Wait(500)) {
+                    if ($Job -and $Job.cancel) { $cts.Cancel(); throw 'Cancelled' }
+                    if ($idle.Elapsed.TotalSeconds -gt 60) { $cts.Cancel(); throw 'Download stalled: no data for 60 seconds. Try again from Nexus.' }
+                }
+                $n = $t.Result
+                if ($n -le 0) { break }
+                $out.Write($buf, 0, $n); $sum += $n; if ($Job) { $Job.done = $sum }
+            }
         }
         finally { $out.Dispose(); $in.Dispose(); $resp.Dispose() }
         [IO.File]::Move($part, $OutFile, $true)

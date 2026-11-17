@@ -339,7 +339,7 @@ function Get-UiState($Shared) {
     $launch = try { Get-BriefCached $Shared } catch { $null }
     $failed = foreach ($f in $s.failed) { [ordered]@{ name = $f.meta.name; archive = [IO.Path]::GetFileName("$($f.archive)"); error = $f.error; at = $f.at; modId = $f.meta.modId } }
     $jobs = foreach ($j in @($Shared.jobs.Clone().Values)) {
-        [ordered]@{ id = $j.id; kind = $j.kind; title = $j.title; status = $j.status; phase = $j.phase; total = $j.total; done = $j.done; detail = $j.detail; error = $j.error; next = $j.next; started = $j.started; finished = $j.finished; modId = $j.modId; fileId = $j.fileId }
+        [ordered]@{ id = $j.id; kind = $j.kind; title = $j.title; status = $j.status; phase = $j.phase; total = $j.total; done = $j.done; detail = $j.detail; error = $j.error; next = $j.next; started = $j.started; finished = $j.finished; modId = $j.modId; fileId = $j.fileId; cancel = [bool]$j.cancel }
     }
     # not while a job runs: it may hold the lock, and its changes must not count as known good (the job's end rebuilds the state)
     if ($Shared.cleanDue -and -not @($jobs | Where-Object { $_.status -eq 'running' }).Count) { $v = $Shared.cleanDue; $Shared.cleanDue = $null; try { Save-CleanRestorePoint $v } catch { } }
@@ -566,6 +566,7 @@ function Invoke-CpRequest {
                         Write-Note "Deleted download $($b.file)"
                         Send-Json $Ctx @{ ok = $true }
                     }
+                    'cancelJob' { $j = $Shared.jobs["$($b.id)"]; if ($j -and $j.status -eq 'running') { $j.cancel = $true }; Send-Json $Ctx @{ ok = $true } }
                     'clearJobs' { foreach ($k in @($Shared.jobs.Clone().Keys)) { if ($Shared.jobs[$k].status -ne 'running') { $Shared.jobs.Remove($k) } }; Send-Json $Ctx @{ ok = $true } }
                     default { throw "Unknown action $op" }
                 }

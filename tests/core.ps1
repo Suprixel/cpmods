@@ -307,6 +307,21 @@ try {
     $sh.jobs.j1.status = 'done'
     [void](Get-UiState $sh)
     Check (-not $sh.cleanDue) 'T26 handled once no job runs'
+
+    Write-Host '--- T27: a stalled download can be cancelled'
+    $tl = [Net.Sockets.TcpListener]::new([Net.IPAddress]::Loopback, 0); $tl.Start(); $port = $tl.LocalEndpoint.Port
+    $sj = [hashtable]::Synchronized(@{ done = 0 })
+    $srv = [powershell]::Create().AddScript({
+            param($tl, $sj)
+            $c = $tl.AcceptTcpClient(); $st = $c.GetStream(); [void]$st.Read([byte[]]::new(4096), 0, 4096)
+            $b = [Text.Encoding]::ASCII.GetBytes("HTTP/1.1 200 OK`r`nContent-Length: 1000`r`n`r`n0123456789"); $st.Write($b, 0, $b.Length); $st.Flush()
+            Start-Sleep -Milliseconds 1500; $sj.cancel = $true; Start-Sleep -Seconds 20; $c.Dispose()
+        }).AddArgument($tl).AddArgument($sj)
+    $h = $srv.BeginInvoke()
+    $out = Join-Path $Sb 'stall.bin'; $sw = [Diagnostics.Stopwatch]::StartNew()
+    $err = try { Save-UrlToFile "http://127.0.0.1:$port/f" $out $sj; '' } catch { $_.Exception.Message }
+    Check ($err -eq 'Cancelled' -and $sw.Elapsed.TotalSeconds -lt 10 -and $sj.done -eq 10 -and -not (Test-Path $out) -and -not (Test-Path "$out.part")) "T27 stops on Cancel and leaves no file ($err, $([int]$sw.Elapsed.TotalSeconds) s)"
+    $srv.Stop(); $srv.Dispose(); $tl.Stop()
 }
 catch { $script:fails++; Write-Host "FAIL (stopped): $($_.Exception.Message)" -ForegroundColor Red }
 finally {
