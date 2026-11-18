@@ -3,6 +3,7 @@
 $ErrorActionPreference = 'Stop'
 $Sb = Join-Path ([IO.Path]::GetTempPath()) "cpmods-core-$([guid]::NewGuid().ToString('N').Substring(0, 8))"
 $g = Join-Path $Sb 'game'
+$env:CPMODS_CONFIG = Join-Path $Sb 'config'; $env:CPMODS_SAVES = Join-Path $Sb 'savedgames'
 $script:fails = 0; $script:passes = 0
 function Check([bool]$Ok, [string]$Msg) { if ($Ok) { $script:passes++ } else { $script:fails++; Write-Host "FAIL: $Msg" -ForegroundColor Red } }
 try {
@@ -153,7 +154,9 @@ try {
     'dll' | Set-Content "$g\red4ext\plugins\X\x.dll"; 'asi' | Set-Content "$g\bin\x64\plugins\cet.asi"
     Install-ModArchive $zB (& $meta 'ModB') -OnConflict overwrite | Out-Null   # base file replaced by B (vanilla backup with B)
     Check ((& $cont $cfgRel) -eq 'B') 'T12 setup B on base file'
+    New-Item -ItemType Directory -Force $env:CPMODS_CONFIG | Out-Null; 'MINE' | Set-Content "$env:CPMODS_CONFIG\UserSettings.json"
     [void](Start-VanillaSession)
+    'RESET BY THE GAME' | Set-Content "$env:CPMODS_CONFIG\UserSettings.json"
     Check (-not (Test-Path "$g\archive\pc\mod") -and -not (Test-Path "$g\red4ext") -and -not (Test-Path "$g\bin\x64\plugins") -and -not (Test-Path "$g\bin\x64\version.dll") -and -not (Test-Path "$g\engine\config\base\scripts.ini")) 'T12 mod folders and loaders set aside'
     Check ((& $cont $cfgRel) -eq 'VANILLA') 'T12 original base file in place'
     $threw = $false; try { Install-ModArchive $zE (& $meta 'ModE') | Out-Null } catch { $threw = $_.Exception.Message -like '*set aside*' }
@@ -162,6 +165,7 @@ try {
     Check ((Test-Path "$g\archive\pc\mod\bbb.archive") -and (Test-Path "$g\red4ext\plugins\X\x.dll") -and (Test-Path "$g\bin\x64\plugins\cet.asi") -and (Test-Path "$g\bin\x64\version.dll") -and (Test-Path "$g\engine\config\base\scripts.ini")) 'T12 everything back'
     Check ((& $cont $cfgRel) -eq 'B') 'T12 mod copy of the base file back'
     Check (-not (Test-Path "$g\_cpmods_vanilla") -and -not (Get-VanillaState)) 'T12 park folder and journal gone'
+    Check ((Get-Content "$env:CPMODS_CONFIG\UserSettings.json" -Raw).Trim() -eq 'MINE' -and -not (Test-Path "$Sb\state\vanilla-usersettings.json")) 'T12 the game settings from before the launch are back'
 
     Write-Host '--- T13: a failed park puts everything back'
     $lock = [IO.File]::Open("$g\red4ext\plugins\X\x.dll", 'Open', 'Read', 'None')

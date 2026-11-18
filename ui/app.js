@@ -2771,7 +2771,7 @@
   async function vanillaStart() {
     const g = S.st && S.st.game;
     if (!g || g.running) { toast('The game is running', 'Close it first.', 'warn', 4000); return; }
-    if (!await ask({ title: 'Play without mods, once?', body: 'cpmods sets your mods aside (moved to a folder inside the game folder, nothing is deleted), starts the game, and puts every mod back as soon as the game closes.<br><br>Use it to check whether a problem comes from a mod. Saving while playing without mods can drop items that mods added, so avoid saving over your main saves.', ok: 'Play without mods' })) return;
+    if (!await ask({ title: 'Play without mods, once?', body: 'cpmods sets your mods aside (moved to a folder inside the game folder, nothing is deleted), starts the game, and puts every mod back as soon as the game closes, along with your game settings (the game resets them when it starts without mods). Settings you change while playing without mods are not kept.<br><br>Use it to check whether a problem comes from a mod. Saving while playing without mods can drop items that mods added, so avoid saving over your main saves.', ok: 'Play without mods' })) return;
     try { await api('/api/vanilla', { op: 'start' }); toast('Setting your mods aside', 'The game starts in a moment.', '', 5000); await refreshState(); }
     catch (e) { toast('Could not start', e.message, 'bad', 10000); }
   }

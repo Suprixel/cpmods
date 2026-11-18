@@ -87,7 +87,7 @@ function Get-GameLocations {
         logs      = Join-Path $g 'red4ext\logs'
         crashes   = Join-Path $env:LOCALAPPDATA 'REDEngine\ReportQueue'
         saves     = Join-Path (Get-SavedGamesDir) 'CD Projekt Red\Cyberpunk 2077'
-        config    = Join-Path $env:LOCALAPPDATA 'CD Projekt Red\Cyberpunk 2077'
+        config    = $(if ($env:CPMODS_CONFIG) { $env:CPMODS_CONFIG } else { Join-Path $env:LOCALAPPDATA 'CD Projekt Red\Cyberpunk 2077' })
         downloads = $p.downloads
         cpmods    = $p.root
     }

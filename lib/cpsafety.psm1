@@ -485,7 +485,10 @@ function Start-VanillaSession {
         if (-not (Test-Path -LiteralPath (Join-Path $g $f) -PathType Leaf)) { continue }
         $moves.Add([ordered]@{ rel = $f; dir = $false; orig = $orig[$f.ToLower()]; done = $false })
     }
-    $j = [ordered]@{ started = (Get-Date).ToString('s'); park = $park; moves = $moves; gameSeen = $false }
+    $j = [ordered]@{ started = (Get-Date).ToString('s'); park = $park; moves = $moves; gameSeen = $false; settings = $null }
+    # the game resets every setting when it finds options only mods know: keep a copy to put back
+    $us = Join-Path (Get-GameLocations).config 'UserSettings.json'
+    if (Test-Path -LiteralPath $us) { $j.settings = Join-Path $p.state 'vanilla-usersettings.json'; Copy-Item -LiteralPath $us -Destination $j.settings -Force }
     Write-JsonFile (Get-VanillaFile) $j
     try {
         foreach ($mv in $moves) {
@@ -537,6 +540,7 @@ function Restore-VanillaSession {
         Write-JsonFile (Get-VanillaFile) $j
         throw "Some mod files could not be put back: $($fail -join '; '). They are in $park."
     }
+    if ($j.settings -and (Test-Path -LiteralPath $j.settings)) { Copy-Item -LiteralPath $j.settings -Destination (Join-Path (Get-GameLocations).config 'UserSettings.json') -Force; Remove-Item -LiteralPath $j.settings -Force }
     Remove-Item -LiteralPath (Get-VanillaFile) -Force
     if ((Test-Path -LiteralPath $park) -and -not (Get-FirstEntry $park -Recurse -File)) { Remove-Item -LiteralPath $park -Recurse -Force }
     Write-Note 'Launch without mods: mods are back'
