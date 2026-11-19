@@ -127,6 +127,17 @@ function Open-CpLink([string]$U) {
     $b = "$((Get-CpSettings).browser)"
     if ($b -and (Test-Path -LiteralPath $b)) { Start-Process -FilePath $b -ArgumentList ('"{0}"' -f $U) } else { Start-Process $U }
 }
+# Logitech mouse: Sync-CpMouse (cpserver.psm1) on a worker, since a sleeping mouse can take seconds to answer
+$shared.mouse = [hashtable]::Synchronized(@{ want = $null; busy = $false; retry = [datetime]::MinValue; tries = 0 })
+$mouseFile = Join-Path (Get-CpPaths).state 'mouse.json'
+function Start-MouseSync {
+    $m = $shared.mouse
+    if ($null -eq $m.want -or $m.busy -or [datetime]::UtcNow -lt $m.retry) { return }
+    $m.busy = $true
+    $w = [powershell]::Create(); $w.RunspacePool = $pool
+    [void]$w.AddCommand('Sync-CpMouse').AddParameter('Shared', $shared)
+    $reqs.Add([pscustomobject]@{ ps = $w; h = $w.BeginInvoke() })
+}
 # light mode while the game runs: lower priority, idle runspaces freed fast, memory handed back
 $lean = @{ check = [datetime]::MinValue; run = $false }
 function Update-GameLean {
@@ -135,6 +146,12 @@ function Update-GameLean {
     $lean.check = $now
     $ps = [Diagnostics.Process]::GetProcessesByName('Cyberpunk2077'); $run = $ps.Length -gt 0; foreach ($x in $ps) { $x.Dispose() }
     $shared.gameRun = $run
+    if ($run -ne $lean.run) {
+        $mp = 0; [void][int]::TryParse("$((Get-UiPerf).mouse)", [ref]$mp)
+        $m = $shared.mouse; $m.tries = 0; $m.retry = [datetime]::MinValue
+        $m.want = if ($run) { if ($mp -gt 0) { $mp } } elseif (Test-Path -LiteralPath $mouseFile) { 'back' }
+    }
+    Start-MouseSync
     if ($run -eq $lean.run) { return }
     $lean.run = $run
     # game started (also from Steam): saves are copied when the mod setup changed; game closed: a launch without mods ends
@@ -157,6 +174,8 @@ try {
     if ($vj -and -not (Get-GameState).running -and ((Get-Date) - [datetime]$vj.started).TotalMinutes -ge 3) { [void](Start-CpJob $shared 'vanilla' 'Bringing your mods back' @{ op = 'restore' }) }
 }
 catch { Write-Note "Could not check the launch without mods: $($_.Exception.Message)" }
+# cpmods quit while the game ran: the mouse's previous profile comes back now (the game watch sets it again if the game runs)
+if (Test-Path -LiteralPath $mouseFile) { $shared.mouse.want = 'back' }
 
 try {
     $tick = 1000

@@ -498,6 +498,30 @@ try {
     $imp = Import-ModSettings ([Convert]::ToBase64String([IO.File]::ReadAllBytes($zs)))
     Check ($imp.count -eq 1 -and $imp.code -eq 2) "T32 a friend's settings zip keeps config.json and leaves out init.lua and .reds ($($imp.count) kept, $($imp.code) left out)"
 
+    Write-Host '--- T34: mouse onboard profiles: directory and polling rate bytes (as read from a PRO X 2)'
+    $dir = [byte[]](0, 1, 1, 0, 0, 2, 0, 0, 1, 0, 1, 0) + [byte[]](@(0xFF) * 20)
+    $pl = @(ConvertFrom-CpProfileDir $dir)
+    Check ($pl.Count -eq 2 -and $pl[0].n -eq 1 -and $pl[0].on -and $pl[1].n -eq 2 -and -not $pl[1].on) 'T34 the directory lists user profiles with their on/off state, not ROM sectors (0x100+)'
+    Check (@(ConvertFrom-CpProfileDir ([byte[]](0, 1, 1, 0, 0xFF, 0xFF, 0, 0, 0, 3, 1, 0))).Count -eq 1) 'T34 the directory ends at FFFF'
+    Check ((Get-CpRateHz 6 $true) -eq 8000 -and (Get-CpRateHz 5 $true) -eq 4000 -and (Get-CpRateHz 4 $true) -eq 2000 -and (Get-CpRateHz 0 $true) -eq 125) 'T34 extended rate index to Hz'
+    Check ((Get-CpRateHz 1 $false) -eq 1000 -and (Get-CpRateHz 8 $false) -eq 125 -and $null -eq (Get-CpRateHz 7 $true) -and $null -eq (Get-CpRateHz 0 $false)) 'T34 millisecond rates, unknown values give nothing'
+
+    Write-Host '--- T35: mouse game watch: profile while playing, the previous one back, a sleeping mouse retried (fake mouse)'
+    & (Get-Module cpserver) { $script:FakeMouse = @{ cur = 1; fail = $false }; function script:Set-CpMouseProfile([int]$N) { if ($script:FakeMouse.fail) { throw 'the mouse did not answer' }; $p = $script:FakeMouse.cur; $script:FakeMouse.cur = $N; $p } }
+    $fake = & (Get-Module cpserver) { $script:FakeMouse }
+    $mf = "$Sb\state\mouse.json"
+    $sh = @{ mouse = [hashtable]::Synchronized(@{ want = 2; busy = $true; retry = [datetime]::MinValue; tries = 0 }) }
+    Sync-CpMouse $sh
+    Check ($fake.cur -eq 2 -and (Get-Content $mf -Raw | ConvertFrom-Json).prev -eq 1 -and $null -eq $sh.mouse.want -and -not $sh.mouse.busy) 'T35 game starts: profile 2, profile 1 remembered'
+    $sh.mouse.want = 'back'; Sync-CpMouse $sh
+    Check ($fake.cur -eq 1 -and -not (Test-Path $mf) -and $null -eq $sh.mouse.want) 'T35 game closes: profile 1 back, nothing left to restore'
+    $fake.fail = $true; $sh.mouse.want = 2; Sync-CpMouse $sh
+    Check ($sh.mouse.want -eq 2 -and $sh.mouse.tries -eq 1 -and $sh.mouse.retry -gt [datetime]::UtcNow.AddSeconds(15) -and -not $sh.mouse.busy -and -not (Test-Path $mf)) 'T35 no answer: the wish stays, retried in 20 s'
+    $fake.fail = $false; $fake.cur = 2; Sync-CpMouse $sh
+    Check ($fake.cur -eq 2 -and -not (Test-Path $mf) -and $null -eq $sh.mouse.want) 'T35 already on the game profile: nothing to restore later'
+    $sh.mouse.want = 'back'; Sync-CpMouse $sh
+    Check ($fake.cur -eq 2 -and $null -eq $sh.mouse.want) 'T35 nothing remembered: the profile is left alone'
+
     Write-Host '--- T33: the server refuses requests without the token, from another host or another web page'
     Copy-Item (Join-Path (Split-Path $PSScriptRoot) 'server.ps1') $Sb; Copy-Item (Join-Path (Split-Path $PSScriptRoot) 'ui') $Sb -Recurse
     $env:CPMODS_NOLAUNCH = '1'

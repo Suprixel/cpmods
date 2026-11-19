@@ -28,6 +28,13 @@ try {
     Check ((Js 'document.querySelector("#sx-downloads .sx-t span").textContent') -like '*asks when two mods share a file*') 'settings: closed header shows values'
     [void](Click '[data-act="sx"][data-k="perf"]')
     Check ([bool](WaitJs '/Server/.test((document.getElementById("perf-now") || {}).innerText || "")' 12000)) 'settings: performance numbers load when opened'
+    # the mouse answer depends on the PC (real hardware, read only): only its arrival is checked
+    Check ([bool](WaitJs '!!document.querySelector("#mouse-set select[data-perf=mouse]") && !document.querySelector("#mouse-set .spin")' 12000)) "settings: mouse profile row and its status load ($(Js 'document.querySelector("#mouse-set .perf-now").innerText'))"
+    [void](Js '(() => { const e = document.querySelector("#mouse-set select"); e.value = e.options[e.options.length - 1].value; e.dispatchEvent(new Event("change", { bubbles: true })); })()'); Start-Sleep -Milliseconds 1200
+    $mp = (Get-Content "$Sb\state\ui.json" -Raw | ConvertFrom-Json).perf.mouse
+    Check ($mp -is [long] -and $mp -ge 1) "settings: the mouse profile saves as a number ($mp)"
+    [void](Js '(() => { const e = document.querySelector("#mouse-set select"); e.value = "0"; e.dispatchEvent(new Event("change", { bubbles: true })); })()'); Start-Sleep -Milliseconds 1200
+    Check ((Get-Content "$Sb\state\ui.json" -Raw | ConvertFrom-Json).perf.mouse -eq 0) 'settings: mouse profile back to Off'
     Check ((Js 'document.querySelectorAll(".perf-est").length') -eq 0) 'settings: memory numbers hidden by default'
     [void](Click '[data-act="perf-info"]')
     Check ((Js 'document.querySelectorAll(".perf-est").length') -gt 3) 'settings: memory numbers on request'

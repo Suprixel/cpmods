@@ -426,6 +426,7 @@ function Invoke-CpRequest {
             'POST /api/prefs' { Save-UiPrefs $raw; Send-Json $Ctx @{ ok = $true } }
             'POST /api/window' { Request-CpWindow $Shared; Send-Json $Ctx @{ ok = $true } }
             'GET /api/perf' { Send-Json $Ctx (Get-CpPerf $Shared) }
+            'GET /api/mouse' { Send-Json $Ctx (Get-CpMouseInfo) }
             'GET /api/storage' { Send-Json $Ctx (Get-StorageInfo) }
             'GET /api/profiles' { Send-Json $Ctx @{ profiles = @(Get-ProfileSummaries) } }
             'POST /api/profiles' {
@@ -692,6 +693,232 @@ function Test-CpShouldExit($Shared) {
     if ($Shared.byeAt -and $Shared.lastSeen -le $Shared.byeAt -and ($now - $Shared.byeAt).TotalSeconds -gt 10) { return $true }
     if (($now - $Shared.lastSeen).TotalMinutes -gt 30) { return $true }
     $false
+}
+
+# ---------- Logitech mouse onboard profiles (HID++ 2.0 over the receiver or the cable) ----------
+# Only switches the active profile (feature 0x8100): nothing is written to the mouse's memory
+function Add-CpHidType {
+    if ('CpHid' -as [type]) { return }
+    Import-CpType 'CpHid' @'
+using System; using System.IO; using System.Threading; using System.Collections.Generic; using System.Runtime.InteropServices; using Microsoft.Win32.SafeHandles;
+public sealed class CpHid : IDisposable {
+  [DllImport("kernel32.dll", SetLastError = true, CharSet = CharSet.Unicode)] static extern SafeFileHandle CreateFile(string n, uint a, uint s, IntPtr sa, uint d, uint f, IntPtr t);
+  [DllImport("hid.dll")] static extern void HidD_GetHidGuid(out Guid g);
+  [DllImport("hid.dll")] static extern bool HidD_GetPreparsedData(SafeFileHandle h, out IntPtr p);
+  [DllImport("hid.dll")] static extern bool HidD_FreePreparsedData(IntPtr p);
+  [DllImport("hid.dll")] static extern int HidP_GetCaps(IntPtr p, out Caps c);
+  [DllImport("setupapi.dll", SetLastError = true)] static extern IntPtr SetupDiGetClassDevs(ref Guid g, IntPtr e, IntPtr w, int f);
+  [DllImport("setupapi.dll", SetLastError = true)] static extern bool SetupDiEnumDeviceInterfaces(IntPtr s, IntPtr d, ref Guid g, int i, ref Ifd r);
+  [DllImport("setupapi.dll", SetLastError = true, CharSet = CharSet.Unicode)] static extern bool SetupDiGetDeviceInterfaceDetail(IntPtr s, ref Ifd r, IntPtr b, int n, out int need, IntPtr d);
+  [DllImport("setupapi.dll")] static extern bool SetupDiDestroyDeviceInfoList(IntPtr s);
+  [StructLayout(LayoutKind.Sequential)] struct Ifd { public int cb; public Guid g; public int f; public IntPtr r; }
+  [StructLayout(LayoutKind.Sequential)] struct Caps { public ushort Usage, UsagePage, InLen, OutLen, FeatLen; [MarshalAs(UnmanagedType.ByValArray, SizeConst = 27)] public ushort[] Rest; }
+  static int swNext;
+
+  // HID++ long-report interfaces (usage page FF00, usage 2) of Logitech devices
+  public static string[] Find() {
+    var list = new List<string>(); Guid g; HidD_GetHidGuid(out g);
+    IntPtr set = SetupDiGetClassDevs(ref g, IntPtr.Zero, IntPtr.Zero, 0x12);
+    if (set == new IntPtr(-1)) return list.ToArray();
+    try {
+      var d = new Ifd(); d.cb = Marshal.SizeOf(typeof(Ifd));
+      for (int i = 0; SetupDiEnumDeviceInterfaces(set, IntPtr.Zero, ref g, i, ref d); i++) {
+        int need; SetupDiGetDeviceInterfaceDetail(set, ref d, IntPtr.Zero, 0, out need, IntPtr.Zero);
+        if (need <= 0) continue;
+        IntPtr buf = Marshal.AllocHGlobal(need);
+        try {
+          Marshal.WriteInt32(buf, IntPtr.Size == 8 ? 8 : 6);
+          if (!SetupDiGetDeviceInterfaceDetail(set, ref d, buf, need, out need, IntPtr.Zero)) continue;
+          string path = Marshal.PtrToStringUni(buf + 4);
+          if (path.IndexOf("vid_046d", StringComparison.OrdinalIgnoreCase) < 0) continue;
+          using (var h = CreateFile(path, 0, 3, IntPtr.Zero, 3, 0, IntPtr.Zero)) {
+            IntPtr p; if (h.IsInvalid || !HidD_GetPreparsedData(h, out p)) continue;
+            Caps c; HidP_GetCaps(p, out c); HidD_FreePreparsedData(p);
+            if (c.UsagePage == 0xFF00 && c.Usage == 2 && c.OutLen == 20) list.Add(path);
+          }
+        } finally { Marshal.FreeHGlobal(buf); }
+      }
+    } finally { SetupDiDestroyDeviceInfoList(set); }
+    return list.ToArray();
+  }
+
+  // plain overlapped I/O with own events: no thread pool (a busy server's pool answered too late)
+  [DllImport("kernel32.dll", SetLastError = true)] static extern bool ReadFile(SafeFileHandle h, IntPtr b, int n, IntPtr done, IntPtr ov);
+  [DllImport("kernel32.dll", SetLastError = true)] static extern bool WriteFile(SafeFileHandle h, IntPtr b, int n, IntPtr done, IntPtr ov);
+  [DllImport("kernel32.dll", SetLastError = true)] static extern bool GetOverlappedResult(SafeFileHandle h, IntPtr ov, out int n, bool wait);
+  [DllImport("kernel32.dll")] static extern bool CancelIoEx(SafeFileHandle h, IntPtr ov);
+  [DllImport("kernel32.dll")] static extern IntPtr CreateEvent(IntPtr a, bool manual, bool init, IntPtr name);
+  [DllImport("kernel32.dll")] static extern bool ResetEvent(IntPtr e);
+  [DllImport("kernel32.dll")] static extern uint WaitForSingleObject(IntPtr h, uint ms);
+  [DllImport("kernel32.dll")] static extern bool CloseHandle(IntPtr h);
+  SafeFileHandle hf; IntPtr rov, wov, rmem, wmem, rev, wev; bool reading; readonly byte[] rbuf = new byte[20]; readonly byte sw;
+  public CpHid(string path) {
+    hf = CreateFile(path, 0xC0000000, 3, IntPtr.Zero, 3, 0x40000000, IntPtr.Zero);
+    if (hf.IsInvalid) throw new IOException("could not open the mouse (error " + Marshal.GetLastWin32Error() + ")");
+    rev = CreateEvent(IntPtr.Zero, true, false, IntPtr.Zero); wev = CreateEvent(IntPtr.Zero, true, false, IntPtr.Zero);
+    int os = Marshal.SizeOf(typeof(NativeOverlapped));
+    rov = Marshal.AllocHGlobal(os); wov = Marshal.AllocHGlobal(os); rmem = Marshal.AllocHGlobal(20); wmem = Marshal.AllocHGlobal(20);
+    sw = (byte)(1 + (Interlocked.Increment(ref swNext) & 0x7FFFFFFF) % 15);   // own id per handle: replies to another handle are skipped
+  }
+  public void Dispose() {
+    if (hf == null) return;
+    int n; if (reading) { CancelIoEx(hf, rov); GetOverlappedResult(hf, rov, out n, true); }
+    hf.Dispose(); hf = null;
+    CloseHandle(rev); CloseHandle(wev);
+    Marshal.FreeHGlobal(rov); Marshal.FreeHGlobal(wov); Marshal.FreeHGlobal(rmem); Marshal.FreeHGlobal(wmem);
+  }
+  static void Arm(IntPtr ov, IntPtr ev) { ResetEvent(ev); var o = new NativeOverlapped(); o.EventHandle = ev; Marshal.StructureToPtr(o, ov, false); }
+  void Send(byte[] req) {
+    Marshal.Copy(req, 0, wmem, 20); Arm(wov, wev);
+    int n;
+    if (!WriteFile(hf, wmem, 20, IntPtr.Zero, wov) && Marshal.GetLastWin32Error() != 997) throw new IOException("could not send to the mouse (error " + Marshal.GetLastWin32Error() + ")");
+    if (WaitForSingleObject(wev, 1000) != 0) { CancelIoEx(hf, wov); GetOverlappedResult(hf, wov, out n, true); throw new TimeoutException("the mouse did not take the request"); }
+    if (!GetOverlappedResult(hf, wov, out n, false)) throw new IOException("could not send to the mouse (error " + Marshal.GetLastWin32Error() + ")");
+  }
+  // next input report into rbuf: its length, or -1 when none came in time (the read stays queued for the next call)
+  int Receive(int ms) {
+    int n;
+    if (!reading) {
+      Arm(rov, rev);
+      if (!ReadFile(hf, rmem, 20, IntPtr.Zero, rov) && Marshal.GetLastWin32Error() != 997) throw new IOException("could not read from the mouse (error " + Marshal.GetLastWin32Error() + ")");
+      reading = true;
+    }
+    if (WaitForSingleObject(rev, (uint)ms) != 0) return -1;
+    reading = false;
+    if (!GetOverlappedResult(hf, rov, out n, false)) throw new IOException("could not read from the mouse (error " + Marshal.GetLastWin32Error() + ")");
+    Marshal.Copy(rmem, rbuf, 0, 20);
+    return n;
+  }
+
+  // HID++ 2.0 request: the 16 reply parameter bytes; throws on an error reply or no answer
+  public byte[] Call(byte dev, byte feat, byte func, byte[] args, int ms) {
+    var req = new byte[20];
+    req[0] = 0x11; req[1] = dev; req[2] = feat; req[3] = (byte)((func << 4) | sw);
+    if (args != null) Array.Copy(args, 0, req, 4, Math.Min(args.Length, 16));
+    Send(req);
+    var until = DateTime.UtcNow.AddMilliseconds(ms);
+    while (true) {
+      int left = (int)(until - DateTime.UtcNow).TotalMilliseconds;
+      if (left <= 0) throw new TimeoutException("the mouse did not answer");
+      int n = Receive(left);
+      if (n < 0) throw new TimeoutException("the mouse did not answer");
+      if (n < 7 || rbuf[1] != dev) continue;
+      if (rbuf[0] == 0x11 && rbuf[2] == feat && rbuf[3] == req[3]) { var r = new byte[16]; Array.Copy(rbuf, 4, r, 0, 16); return r; }
+      if (rbuf[0] == 0x11 && rbuf[2] == 0xFF && rbuf[3] == feat && rbuf[4] == req[3]) throw new InvalidOperationException("the mouse refused (HID++ error " + rbuf[5] + ")");
+      if (rbuf[0] == 0x10 && rbuf[2] == 0x8F && rbuf[3] == feat) throw new InvalidOperationException("no device at this slot (error " + rbuf[5] + ")");
+    }
+  }
+  // index of a feature on the device, 0 when it has none
+  public byte Feature(byte dev, ushort id, int ms) { return Call(dev, 0, 0, new byte[] { (byte)(id >> 8), (byte)id }, ms)[0]; }
+}
+'@
+}
+
+# Profile directory (onboard memory sector 0): 4-byte entries (sector hi, lo, enabled, 0) until FFFF; user profiles only
+function ConvertFrom-CpProfileDir([byte[]]$Dir) {
+    for ($i = 0; $i + 3 -lt $Dir.Length; $i += 4) {
+        $n = $Dir[$i] * 256 + $Dir[$i + 1]
+        if ($n -eq 0xFFFF) { break }
+        if ($n -ge 1 -and $n -le 0xFF) { [pscustomobject]@{ n = $n; on = $Dir[$i + 2] -ne 0 } }
+    }
+}
+# A profile's first byte: with feature 0x8061 an index (125 Hz doubled per step, 6 = 8000 Hz), otherwise milliseconds
+function Get-CpRateHz([int]$B, [bool]$Ext) {
+    if ($Ext) { if ($B -le 6) { return 125 * [int][Math]::Pow(2, $B) } }
+    elseif ($B -ge 1) { return [int](1000 / $B) }
+    $null
+}
+
+# First Logitech device with onboard profiles and an adjustable report rate (a mouse).
+# The slot that answered last time (else receiver slot 1) waits 2 s: a sleeping mouse wakes on the request.
+# Other slots and the cable (FF) get 300 ms: a receiver reports empty slots on another channel, so they just time out.
+function Open-CpMouse {
+    Add-CpHidType
+    $script:MouseWhy = 'no Logitech receiver or mouse is connected'
+    $first = if ($script:MouseSlot) { $script:MouseSlot } else { 1 }
+    foreach ($path in [CpHid]::Find()) {
+        $h = $null
+        try {
+            $h = [CpHid]::new($path)
+            foreach ($dev in @($first) + @(1, 0xFF, 2, 3, 4, 5, 6 | Where-Object { $_ -ne $first })) {
+                $p = try { $h.Feature($dev, 0x8100, $(if ($dev -eq $first) { 2000 } else { 300 })) } catch { $script:MouseWhy = "$($_.Exception.InnerException.Message ?? $_.Exception.Message)"; 0 }
+                if (-not $p) { continue }
+                $x = $h.Feature($dev, 0x8061, 500)
+                if (-not $x -and -not $h.Feature($dev, 0x8060, 500)) { continue }
+                $script:MouseSlot = $dev
+                $name = ''
+                $nf = $h.Feature($dev, 0x0005, 500)
+                if ($nf) {
+                    $len = $h.Call($dev, $nf, 0, $null, 300)[0]
+                    for ($o = 0; $o -lt $len; $o += 16) { $name += [Text.Encoding]::ASCII.GetString($h.Call($dev, $nf, 1, [byte[]]@($o), 300)) }
+                    $name = $name.Substring(0, [Math]::Min($len, $name.Length)).TrimEnd([char]0)
+                }
+                return @{ h = $h; dev = [byte]$dev; prof = $p; ext = [bool]$x; name = $name }
+            }
+        }
+        catch { $script:MouseWhy = "$($_.Exception.InnerException.Message ?? $_.Exception.Message)" }
+        if ($h) { $h.Dispose() }
+    }
+    $null
+}
+function Read-CpMouseMem($M, [int]$Sector, [int]$Offset) {
+    $M.h.Call($M.dev, $M.prof, 5, [byte[]]@(($Sector -shr 8), ($Sector -band 255), ($Offset -shr 8), ($Offset -band 255)), 500)
+}
+function Get-CpMouseProfiles($M) { @(ConvertFrom-CpProfileDir ((Read-CpMouseMem $M 0 0) + (Read-CpMouseMem $M 0 16))) }
+function Get-CpMouseCurrent($M) { $c = $M.h.Call($M.dev, $M.prof, 4, $null, 500); $c[0] * 256 + $c[1] }
+
+# For Settings: the mouse, its profiles with their wireless polling rate, and the active one
+function Get-CpMouseInfo {
+    $m = Open-CpMouse
+    if (-not $m) { return @{ found = $false; why = $script:MouseWhy } }
+    try {
+        $list = foreach ($p in Get-CpMouseProfiles $m) { [ordered]@{ n = $p.n; on = $p.on; hz = Get-CpRateHz (Read-CpMouseMem $m $p.n 0)[0] $m.ext } }
+        [ordered]@{ found = $true; name = $m.name; onboard = $m.h.Call($m.dev, $m.prof, 2, $null, 500)[0] -eq 1; current = Get-CpMouseCurrent $m; profiles = @($list) }
+    }
+    finally { $m.h.Dispose() }
+}
+
+# Makes onboard profile N active; returns the profile that was active before
+function Set-CpMouseProfile([int]$N) {
+    $m = Open-CpMouse
+    if (-not $m) { throw "no Logitech mouse with onboard profiles answered ($script:MouseWhy)" }
+    try {
+        if ($m.h.Call($m.dev, $m.prof, 2, $null, 500)[0] -ne 1) { throw 'the mouse is in software mode (G HUB controls it), so its onboard profiles are not used' }
+        if (-not (Get-CpMouseProfiles $m | Where-Object { $_.n -eq $N -and $_.on })) { throw "profile $N is not turned on in the mouse's onboard memory" }
+        $prev = Get-CpMouseCurrent $m
+        if ($prev -ne $N) { [void]$m.h.Call($m.dev, $m.prof, 3, [byte[]]@(($N -shr 8), ($N -band 255)), 500) }
+        $prev
+    }
+    finally { $m.h.Dispose() }
+}
+
+# Game watch (server worker): $Shared.mouse.want = profile number while playing, 'back' after the game closed.
+# state\mouse.json keeps the previous profile until it is back, also across a cpmods restart. Retried for 10 minutes.
+function Sync-CpMouse($Shared) {
+    Set-CpContext 'server' $true
+    $m = $Shared.mouse; $want = $m.want
+    $f = Join-Path (Get-CpPaths).state 'mouse.json'
+    try {
+        if ("$want" -eq 'back') {
+            $j = try { Read-JsonFile $f } catch { $null }
+            if ($j -and [int]$j.prev -gt 0) { [void](Set-CpMouseProfile ([int]$j.prev)); Write-Note "Mouse: profile $($j.prev) is back" }
+            Remove-Item -LiteralPath $f -Force -ErrorAction SilentlyContinue
+        }
+        elseif ([int]$want -gt 0) {
+            $prev = Set-CpMouseProfile ([int]$want)
+            if ($prev -ne [int]$want) { Write-JsonFile $f ([ordered]@{ prev = $prev; game = [int]$want }) }
+            Write-Note "Mouse: profile $want while playing (was $prev)"
+        }
+        # the game may have started or closed meanwhile: that newer wish stays
+        if ("$($m.want)" -eq "$want") { $m.want = $null }
+    }
+    catch {
+        $m.tries++
+        if ($m.tries -eq 1) { Write-Note "Mouse: $($_.Exception.Message) (trying again every 20 s)" }
+        if ($m.tries -ge 30 -and "$($m.want)" -eq "$want") { $m.want = $null; Write-Note 'Mouse: gave up after 10 minutes' }
+        $m.retry = [datetime]::UtcNow.AddSeconds(20)
+    }
+    finally { $m.busy = $false }
 }
 
 Export-ModuleMember -Function *

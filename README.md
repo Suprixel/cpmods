@@ -13,6 +13,7 @@ A simple mod manager for Cyberpunk 2077 on Windows. Find mods on Nexus, click "S
 - **When something breaks.** The Reports page reads the RED4ext, CET and redscript logs and crash reports. Each problem says which other mod is involved and what you can do: update or turn off the mod, open its log, or hide a message you already know about. A message that also showed up in an earlier launch that closed normally is not flagged again. Troubleshooting turns half of your mods off per launch until it finds the one causing the problem.
 - **Profiles.** Save which mods are on as a named profile (Story, Photo mode...) and switch between them with one click.
 - **Disk space.** How much your mods and cpmods' own data take, the largest mods, and a cleanup of downloads no mod or restore point uses. After an update, a mod's two previous downloads stay so you can go back; older ones are deleted.
+- **Mouse profile while playing.** For Logitech mice with onboard profiles (Onboard Memory Manager or G HUB): pick a profile, for example one with a lower polling rate if 8000 Hz drops your fps. cpmods switches to it when the game starts, also from Steam, and puts the previous one back when the game closes. It only switches profiles and never writes to the mouse.
 - **Your look.** Yellow, red or your own color, on a matching, grey, black, OLED black, white or custom background.
 - **Load order and conflicts.** A Compatibility page with every finding and its risk; when two mods change the same game assets you pick which one wins (either of them). The Library only warns about what can crash the game. Plus a map of every key binding used by the game and your mods.
 - **Modpacks.** Turn the mods you have on into a short code of letters and digits (about 300 characters for 125 mods; a longer code that also lists each file's mod is there too) to paste in any chat. A friend pastes it, or the whole message, in Downloads, Modpacks: cpmods looks the mods up on Nexus, shows what changes, skips mods they already have, updates their older versions (or keeps them, their choice), makes a restore point and a mod settings backup, then queues the downloads. A mistyped or cut code is refused.
@@ -50,7 +51,7 @@ pwsh -NoProfile -File tests\merge-json.ps1
 
 `tests\core.ps1` also starts a throwaway server and checks that it refuses requests without its token, from another host name or from another web page.
 
-The UI tests (`tests\ui`) copy the app into `%TEMP%\cpmods-uisb` with a fake game folder, open a hidden app window (Microsoft Edge WebView2) and drive it. They never start the game or open Nexus pages:
+The UI tests (`tests\ui`) copy the app into `%TEMP%\cpmods-uisb` with a fake game folder, open a hidden app window (Microsoft Edge WebView2) and drive it. They never start the game or open Nexus pages, and only read a connected Logitech mouse (no profile switch):
 
 ```
 Get-ChildItem tests\ui\*.ps1 -Exclude cdp.ps1, sandbox.ps1 | ForEach-Object { pwsh -NoProfile -File $_.FullName }

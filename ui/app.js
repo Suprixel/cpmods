@@ -169,7 +169,7 @@
   }
 
   // ---------- performance: picture limits and light mode while the game runs ----------
-  const PERF_DEF = { pics: 'large', maxPics: 48, galMax: 12, vidMax: 4, descPics: true, fx: true, lean: true, window: 'app', gpu: true };
+  const PERF_DEF = { pics: 'large', maxPics: 48, galMax: 12, vidMax: 4, descPics: true, fx: true, lean: true, window: 'app', gpu: true, mouse: 0 };
   const perf = () => Object.assign({}, PERF_DEF, prefs.perf || {});
   // decoded size in MB (width x height x 4 bytes), measured on Nexus and YouTube files
   const PIC_MB = { large: 622 * 349 * 4 / 1048576, small: 385 * 216 * 4 / 1048576, full: 1600 * 900 * 4 / 1048576, yt: 480 * 360 * 4 / 1048576, ytSmall: 320 * 180 * 4 / 1048576 };
@@ -1564,6 +1564,24 @@
     const el = $('#perf-now');
     if (el) el.innerHTML = perfNowHtml();
   }
+  // Logitech onboard profile while playing: the server switches when the game starts and puts the previous one back after
+  function mouseHtml() {
+    const P = perf(), m = S.mouse, found = m && m.found ? m.profiles : null;
+    const list = [[0, 'Off']].concat((found || [1, 2, 3, 4, 5].map(n => ({ n, on: true }))).map(p => [p.n, `Profile ${p.n}${p.hz ? ` · ${p.hz} Hz` : ''}${p.on ? '' : ' (off on the mouse)'}`]));
+    if (P.mouse && !list.some(x => x[0] === P.mouse)) list.push([P.mouse, `Profile ${P.mouse} (not on this mouse)`]);
+    const cur = found && found.find(p => p.n === m.current);
+    const now = !m ? '<span class="spin"></span><span>Looking for the mouse...</span>'
+      : m.error ? `<span class="dim">${h(m.error)}</span>`
+        : !m.found ? '<span class="dim">No Logitech mouse with onboard profiles answered. Wired or wireless both work; a sleeping mouse wakes when moved.</span>'
+          : `<span>${h(m.name || 'Logitech mouse')}: <b>profile ${m.current}</b> <span class="dim">active${cur && cur.hz ? `, ${cur.hz} Hz` : ''}</span></span>${m.onboard ? '' : '<span class="pill warn">Software mode: G HUB controls it</span>'}`;
+    return `<div class="setting"><div class="setting-text"><b>Mouse profile while playing</b><span>Logitech mice with onboard profiles (Onboard Memory Manager or G HUB). Use one with a lower polling rate if 8000 Hz drops your fps. The profile that was active comes back when the game closes.</span></div><select data-perf="mouse" aria-label="Mouse profile while playing">${opt(list, P.mouse)}</select></div>
+      <div class="perf-now">${now}<button class="link-btn small" data-act="mouse-refresh">Check again</button></div>`;
+  }
+  async function loadMouse() {
+    try { S.mouse = await api('/api/mouse'); } catch (e) { S.mouse = { error: e.message }; }
+    const el = $('#mouse-set');
+    if (el) el.innerHTML = mouseHtml();
+  }
   // compact rows; the measured memory numbers behind each choice show on request
   function perfHtml() {
     const P = perf(), info = prefs.perfInfo === true, gal = n => n ? PIC_MB.full + (n - 1) * PIC_MB.small : 0;
@@ -1575,6 +1593,7 @@
       <div class="sub-label">Disk space</div><div id="disk-now">${diskHtml()}</div>
       <div class="sub-label">While the game runs</div>
       ${row('Lighter while the game runs', 'Reports page only, no pictures, slower refresh, lower priority.', 'Measured: window 167 to 43 MB, server 110 to 26 MB (Task Manager). Minimizing cpmods frees memory the same way.', sw('lean', 'Lighter while the game runs'))}
+      <div id="mouse-set">${mouseHtml()}</div>
       <div class="sub-label">Pictures</div>
       <div class="set-grid">
       ${row('Tile pictures', 'On Discover and Collections.', `About 20 on screen: large ${fmtMb(20 * PIC_MB.large)}, small ${fmtMb(20 * PIC_MB.small)}.`, sel('pics', 'Tile pictures', [['large', 'Large'], ['small', 'Small'], ['off', 'Off']]))}
@@ -1646,7 +1665,7 @@
     const parts = {
       downloads: [s.autoInstall ? 'Installs when downloaded' : 'Installs when you choose', s.askOverwrite !== false ? 'asks when two mods share a file' : 'last installed mod wins shared files', s.browser ? 'links in ' + browserName() : 'links in your default browser'],
       look: [th.name, bg.id === 'match' ? 'matching background' : bg.name.toLowerCase() + ' background', P.fx ? 'effects on' : 'effects off'],
-      perf: [P.lean ? 'Lighter while playing' : 'Same while playing', `${P.pics} tile pictures`, P.window === 'browser' ? 'browser window' : 'built-in window', S.disk && S.disk.mods ? fmtSize(S.disk.mods.bytes) + ' of mods' : ''],
+      perf: [P.lean ? 'Lighter while playing' : 'Same while playing', P.mouse ? `mouse profile ${P.mouse} in game` : '', `${P.pics} tile pictures`, P.window === 'browser' ? 'browser window' : 'built-in window', S.disk && S.disk.mods ? fmtSize(S.disk.mods.bytes) + ' of mods' : ''],
       nexus: [st.key ? 'API key set' : 'API key missing', st.handler ? 'download links work' : 'download links not set up'],
       patch: [`"Updated for ${s.patchLabel}" means updated since ${fmtDate(s.patchDate)}`],
       share: ['App zip, your mod list, your mod settings'],
@@ -1688,13 +1707,13 @@
         <div class="sx-body" id="sxb-${x.k}"${on ? '' : ' hidden'}>${on ? sectionBody(x.k) : ''}</div></section>`;
     }).join('')}</div></div>`;
     // live memory numbers only while their section is open (one WMI query each time); disk space once per opening
-    if (open.has('perf')) { loadPerfNow(); if (!S.disk) loadDisk(); }
+    if (open.has('perf')) { loadPerfNow(); if (!S.disk) loadDisk(); if (!S.mouse) loadMouse(); }
   }
   function toggleSection(k, force) {
     const open = setOpen(), on = force != null ? force : !open.has(k);
     if (on) open.add(k); else open.delete(k);
     // disk space is measured again each time its section opens
-    if (on && k === 'perf') S.disk = null;
+    if (on && k === 'perf') { S.disk = null; S.mouse = null; }
     prefs.setOpen = [...open]; savePrefs();
     if (S.page === 'settings') pageSettings($('#page'));
   }
@@ -3075,6 +3094,7 @@
     'win': t => window.chrome.webview.postMessage(t.dataset.v),
     'tb-reload': () => location.reload(),
     'perf-free': () => { IMG.free(); api('/api/free', {}).catch(() => { }); toast('Freeing memory', 'New numbers in a few seconds.', '', 2500); setTimeout(loadPerfNow, 4000); },
+    'mouse-refresh': () => { S.mouse = null; const el = $('#mouse-set'); if (el) el.innerHTML = mouseHtml(); loadMouse(); },
     'perf-refresh': () => { S.perfNow = null; const el = $('#perf-now'); if (el) el.innerHTML = perfNowHtml(); loadPerfNow(); },
     'toast-close': t => { const x = t.closest('.toast'); if (x) x.remove(); },
     'settings-at': t => openSettings(t.dataset.k),
