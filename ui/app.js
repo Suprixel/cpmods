@@ -17,7 +17,7 @@
   const MOD_FIELDS = 'modId name summary version author updatedAt createdAt endorsements downloads adultContent thumbnailUrl thumbnailLargeUrl modCategory { name } uploader { name } tags { name }';
   const REQ_FIELDS = 'modRequirements { nexusRequirements { nodes { modId modName notes externalRequirement } } }';
   // Game: play, launch options, folders, saves; Reports: what happened when the game ran
-  const PAGES = [['discover', 'Discover'], ['collections', 'Collections'], ['library', 'Library'], ['downloads', 'Downloads'], ['game', 'Game'], ['reports', 'Reports'], ['settings', 'Settings']];
+  const PAGES = [['discover', 'Discover'], ['collections', 'Collections'], ['library', 'Library'], ['compat', 'Compatibility'], ['downloads', 'Downloads'], ['game', 'Game'], ['reports', 'Reports'], ['settings', 'Settings']];
   // what each kind of installed file is, in plain words (server: Get-FileKind)
   const KIND = {
     archive: { l: 'Assets', i: 'box', c: 'k-assets', t: 'Game assets (.archive): models, textures, sounds or game data. The game loads these itself.' },
@@ -81,6 +81,7 @@
     alert: '<path d="M12 4 2.8 19.5h18.4z"/><path d="M12 10v4.5M12 17.2v.1"/>',
     info: '<circle cx="12" cy="12" r="9"/><path d="M12 11v5.5M12 7.8v.1"/>',
     shield: '<path d="M12 3 5 6v5c0 4.5 3 8.3 7 10 4-1.7 7-5.5 7-10V6z"/><path d="m9 12 2 2 4-4"/>',
+    compat: '<path d="M12 3 5 6v5c0 4.5 3 8.3 7 10 4-1.7 7-5.5 7-10V6z"/><path d="m9 12 2 2 4-4"/>',
     refresh: '<path d="M20 11a8 8 0 1 0-2.3 5.7"/><path d="M20 5v6h-6"/>',
     plus: '<path d="M12 5v14M5 12h14"/>',
     folder: '<path d="M3.5 6.5a1 1 0 0 1 1-1h5l2 2.5h8a1 1 0 0 1 1 1v9a1 1 0 0 1-1 1h-15a1 1 0 0 1-1-1z"/>',
@@ -564,6 +565,8 @@
       const lt = st.launch, bs = st.bisect;
       if (bs && bs.active) counts.reports = [bs.phase === 'done' ? 'done' : 'R' + bs.round, true];
       else if (lt && lt.result === 'crash' && !lt.running) counts.reports = ['!', true];
+      const cr = allCrashIssues().length;
+      if (cr) counts.compat = [cr, true];
     }
     setHtml($('#nav'), PAGES.map(([k, l]) => `<button class="nav-item${S.page === k ? ' active' : ''}" data-act="go" data-page="${k}"${S.page === k ? ' aria-current="page"' : ''} title="${l}">${ic(k)}<span>${l}</span>${counts[k] ? `<span class="nav-count${counts[k][1] ? ' hot' : ''}">${counts[k][0]}</span>` : ''}</button>`).join(''));
   }
@@ -633,7 +636,7 @@
     return r + '/tool/' + p.kind;
   }
   function parseRoute(hash) {
-    const m = String(hash || '').match(/^#\/(discover|collections|library|downloads|game|reports|settings)(?:\/(mod|col|tool|files|crash|preview)\/(.+))?$/);
+    const m = String(hash || '').match(/^#\/(discover|collections|library|compat|downloads|game|reports|settings)(?:\/(mod|col|tool|files|crash|preview)\/(.+))?$/);
     if (!m) return null;
     let arg = m[3] || '';
     try { arg = decodeURIComponent(arg); } catch (e) { /* keep raw */ }
@@ -772,6 +775,7 @@
     if (S.page === 'collections') return pageCollections(el);
     if (!S.st) { el.innerHTML = `<div class="page-body"><div class="sk sk-line" style="width:40%"></div><div class="sk sk-line"></div><div class="sk sk-line" style="width:70%"></div></div>`; return; }
     if (S.page === 'library') return pageLibrary(el);
+    if (S.page === 'compat') return pageCompat(el);
     if (S.page === 'downloads') return pageDownloads(el);
     if (S.page === 'game') return pageGame(el);
     if (S.page === 'reports') return pageReports(el);
@@ -995,7 +999,11 @@
     if (!c || !c.issues) return [];
     return c.issues.filter(i => !i.ignored && i.risk !== 'ok' && (i.mods || []).includes(name));
   }
-  const worstRisk = list => ['high', 'medium', 'low'].find(r => list.some(i => i.risk === r)) || null;
+  // the only conflicts shown outside the Compatibility page: ones that can crash the game or stop mods from loading
+  // (a missing requirement, an outdated plugin, a .dll or .asi two mods share)
+  const crashy = i => !i.ignored && i.risk === 'high' && ['requirement', 'outdated', 'files'].includes(i.kind);
+  const crashIssues = name => modIssues(name).filter(crashy);
+  const allCrashIssues = () => ((S.lib.compat && S.lib.compat.issues) || []).filter(crashy);
   function libFiltered() {
     const L = S.lib, q = L.q.trim().toLowerCase();
     let items = libItems();
@@ -1004,7 +1012,6 @@
     else if (L.filter === 'off') items = items.filter(m => !m.on);
     else if (L.filter === 'upd') items = items.filter(hasUpdate);
     else if (L.filter === 'new') items = items.filter(isNewSinceLaunch);
-    else if (L.filter === 'issues') items = items.filter(m => modIssues(m.name).some(i => i.risk === 'high' || i.risk === 'medium'));
     if (L.kind) items = items.filter(m => { const k = m.kinds || []; return k.includes(L.kind) || (L.kind === 'native' && k.includes('loader')) || (L.kind === 'config' && k.includes('plugindata')); });
     if (L.src) items = items.filter(m => srcOf(m) === L.src);
     if (q) items = items.filter(m => m.name.toLowerCase().includes(q));
@@ -1021,7 +1028,6 @@
         <div><h1>Library</h1><p class="sub">Everything cpmods manages in your game folder. Click a mod for its files; switches turn mods off without deleting them.</p></div>
         <div class="ph-actions">
           <button class="btn" data-act="lib-updates"${S.lib.checking ? ' disabled' : ''}>${S.lib.checking ? '<span class="spin"></span>Checking' : ic('refresh') + 'Check for updates'}</button>
-          <button class="btn" data-act="tool" data-tool="compat">${ic('shield')}Compatibility</button>
           <button class="btn" data-act="tool" data-tool="profiles" title="Named sets of mods to switch between">${ic('collections')}${S.st.profile ? `Profile: ${h(S.st.profile)}` : 'Profiles'}</button>
           <button class="btn" data-act="tool" data-tool="backups" title="Restore points, save copies and mod settings">${ic('history')}Backups</button>
           <button class="icon-btn" data-act="lib-more" title="More tools" aria-label="More tools">${ic('more')}</button>
@@ -1037,12 +1043,12 @@
     const pb = $('#page [data-tool="profiles"]');
     if (pb) setHtml(pb, ic('collections') + (S.st.profile ? `Profile: ${h(S.st.profile)}` : 'Profiles'));
     const all = libItems(), L = S.lib;
-    const n = { all: all.length, mods: all.filter(m => !m.fw).length, fw: all.filter(m => m.fw).length, off: all.filter(m => !m.on).length, upd: all.filter(hasUpdate).length, nw: all.filter(isNewSinceLaunch).length, iss: all.filter(m => modIssues(m.name).some(i => i.risk === 'high' || i.risk === 'medium')).length };
-    const segs = [['all', 'All', n.all], ['mods', 'Mods', n.mods], ['fw', 'Frameworks', n.fw], ['off', 'Disabled', n.off], ['upd', 'Updates', L.updates ? n.upd : '?'], ['new', 'New', n.nw], ['issues', 'Conflicts', L.compat && !L.compat.error ? n.iss : '?']];
+    const n = { all: all.length, mods: all.filter(m => !m.fw).length, fw: all.filter(m => m.fw).length, off: all.filter(m => !m.on).length, upd: all.filter(hasUpdate).length, nw: all.filter(isNewSinceLaunch).length };
+    const segs = [['all', 'All', n.all], ['mods', 'Mods', n.mods], ['fw', 'Frameworks', n.fw], ['off', 'Disabled', n.off], ['upd', 'Updates', L.updates ? n.upd : '?'], ['new', 'New', n.nw]];
     body.innerHTML = `
       <div class="statusline" id="lib-sum"></div>
       <div class="lib-tools">
-        <div class="toolbar"><div class="seg" role="group" aria-label="Show">${segs.map(([v, l, c]) => `<button data-act="lib-filter" data-v="${v}" class="${L.filter === v ? 'on' : ''}" title="${{ new: 'Installed after your last launch: not tested in game yet', issues: 'Mods with a medium or high risk conflict' }[v] || l}">${l} <span class="n">${c}</span></button>`).join('')}</div>
+        <div class="toolbar"><div class="seg" role="group" aria-label="Show">${segs.map(([v, l, c]) => `<button data-act="lib-filter" data-v="${v}" class="${L.filter === v ? 'on' : ''}" title="${{ new: 'Installed after your last launch: not tested in game yet' }[v] || l}">${l} <span class="n">${c}</span></button>`).join('')}</div>
           <span class="spacer"></span><div class="seg icons" role="group" aria-label="View">${[['list', 'List'], ['map', 'Folder map: where each mod sits in the game folder']].map(([v, tip]) => `<button data-act="lib-view" data-v="${v}" class="${L.view === v ? 'on' : ''}" title="${tip}">${ic(v)}<span>${v === 'list' ? 'List' : 'Map'}</span></button>`).join('')}</div></div>
         <div class="toolbar">
           <div class="searchbar sm">${ic('search')}<input type="search" id="lib-q" placeholder="Filter by name   ( / )" value="${h(L.q)}" aria-label="Filter by name"></div>
@@ -1056,25 +1062,17 @@
     renderLibSum();
     renderLibList();
   }
-  // one compact line instead of tiles: the filter counts already show new/disabled/conflicts
+  // one compact line instead of tiles: the filter counts already show new/disabled; conflicts only when they can crash the game
   function renderLibSum() {
     const box = $('#lib-sum');
     if (!box) return;
     const all = libItems(), L = S.lib;
     const n = { mods: all.filter(m => !m.fw).length, fw: all.filter(m => m.fw).length, upd: all.filter(hasUpdate).length };
-    const comp = L.compat;
-    let ct;
-    if (L.compatLoading && !comp) ct = ['', '<span class="spin"></span>', 'Checking for conflicts'];
-    else if (!comp) ct = ['', ic('shield'), 'Conflicts not checked'];
-    else if (comp.error) ct = ['bad', ic('alert'), 'Conflict check failed'];
-    else {
-      const live = comp.issues.filter(i => !i.ignored), hi = live.filter(i => i.risk === 'high').length, me = live.filter(i => i.risk === 'medium').length;
-      ct = [hi ? 'bad' : me ? 'warn' : 'ok', ic(hi + me ? 'alert' : 'check'), hi + me ? `${hi} high, ${me} medium risk conflicts` : 'No risky conflicts'];
-    }
+    const cr = allCrashIssues().length;
     const size = all.filter(m => m.on).reduce((s, m) => s + (+m.size || 0), 0);
     box.innerHTML = `<span class="st-item"><b>${n.mods}</b>&nbsp;mods and ${n.fw} frameworks &middot; ${fmtSize(size)} on disk</span>
       <button class="st-item link${n.upd ? ' warn' : ''}" data-act="${L.updates ? 'lib-filter' : 'lib-updates'}" data-v="upd">${ic('refresh')}${L.updates ? (n.upd ? `${plural(n.upd, 'update')} available` : 'Everything up to date') : 'Updates not checked'}</button>
-      <button class="st-item link ${ct[0]}" data-act="tool" data-tool="compat">${ct[1]}${h(ct[2])}</button>`;
+      ${cr ? `<button class="st-item link bad" data-act="go" data-page="compat" title="See them on the Compatibility page">${ic('alert')}${plural(cr, 'problem')} that can crash the game</button>` : ''}`;
   }
   function renderLibList() {
     const box = $('#lib-list');
@@ -1084,7 +1082,7 @@
     if (L.view === 'map') return renderLibMap(box, items);
     if (!items.length) {
       const empty = !S.st.mods.length && !S.st.disabled.length;
-      box.innerHTML = `<div class="card"><div class="empty">${empty ? `<h3>No mods yet</h3>Find mods in Discover, or let cpmods take over mods you installed before.<br><button class="btn primary" data-act="go" data-page="discover">Browse mods</button> <button class="btn" data-act="tool" data-tool="discover">Find existing mods</button>` : L.filter === 'upd' && !L.updates ? `<h3>Updates not checked yet</h3><button class="btn primary" data-act="lib-updates">Check for updates</button>` : L.filter === 'issues' && !L.compat ? `<h3>Compatibility not checked yet</h3><button class="btn primary" data-act="tool" data-tool="compat">Check now</button>` : '<h3>Nothing here</h3>No mods match these filters.'}</div></div>`;
+      box.innerHTML = `<div class="card"><div class="empty">${empty ? `<h3>No mods yet</h3>Find mods in Discover, or let cpmods take over mods you installed before.<br><button class="btn primary" data-act="go" data-page="discover">Browse mods</button> <button class="btn" data-act="tool" data-tool="discover">Find existing mods</button>` : L.filter === 'upd' && !L.updates ? `<h3>Updates not checked yet</h3><button class="btn primary" data-act="lib-updates">Check for updates</button>` : '<h3>Nothing here</h3>No mods match these filters.'}</div></div>`;
       return;
     }
     // Updates view: tick the ones to update, then one button for all of them
@@ -1097,10 +1095,10 @@
   function libRow(m) {
     const src = srcOf(m), nx = String(m.source || '').match(/nexus:(\d+)/);
     const up = upOf(m), fwu = fwOf(m), queued = up && inQueue(up.fileId);
-    const iss = modIssues(m.name), wr = worstRisk(iss), isNew = isNewSinceLaunch(m);
+    const cr = crashIssues(m.name), isNew = isNewSinceLaunch(m);
     const pills = [m.fw ? '<span class="pill">Framework</span>' : '', src === 'adopted' ? '<span class="pill muted" title="Installed before cpmods; removing sends its files to the Recycle Bin">Existing files</span>' : '',
       isNew ? '<span class="pill info" title="Installed after your last launch: not tested in game yet">New</span>' : '',
-      wr === 'high' || wr === 'medium' ? `<span class="pill ${RISK[wr][0]}" title="${h(iss.map(i => i.title).join('\n'))}">${wr === 'high' ? 'Risky conflict' : 'Check conflict'}</span>` : '',
+      cr.length ? `<span class="pill bad" title="${h(cr.map(i => i.title).join('\n'))}&#10;Details on the Compatibility page.">May crash</span>` : '',
       up ? (queued ? `<span class="pill info" title="Waiting in the download queue">v${h(up.version)} queued</span>` : `<span class="pill warn">v${h(up.version)} available</span>`) : '', fwu ? `<span class="pill warn">${h(fwu.latest)} available</span>` : '', m.broken ? '<span class="pill bad">Incomplete install</span>' : ''].join('');
     const sub = [(m.kinds || []).length ? `<span class="kchips">${kindChips(m.kinds)}</span>` : '', SRC_LABEL[src], m.on ? (m.installed ? 'added ' + fmtDate(m.installed) : '') : 'off since ' + fmtDate(m.disabledAt),
       m.fileCount != null ? plural(m.fileCount, 'file') + (m.size ? ' &middot; ' + fmtSize(m.size) : '') : ''].filter(Boolean).map(x => `<span>${x}</span>`).join('');
@@ -1117,10 +1115,12 @@
     if (S.lib.compatStale) force = true;
     if (S.lib.compatLoading || (S.lib.compat && !S.lib.compat.error && !force)) return;
     S.lib.compatLoading = true; S.lib.compatStale = false;
-    if (S.page === 'library') renderLibSum();
+    if (S.page === 'compat') renderPage();
     try { S.lib.compat = await api('/api/compat'); } catch (e) { S.lib.compat = { error: e.message }; }
     S.lib.compatLoading = false;
     if (S.page === 'library') { renderLibSum(); if (!typing()) renderLibBody(); else renderLibList(); }
+    if (S.page === 'compat') renderPage();
+    renderNav();
     if (S.pane && (S.pane.kind === 'mod' || S.pane.kind === 'files')) renderPane();
   }
   async function ensureLibFiles() {
@@ -1398,8 +1398,12 @@
     if (m) {
       const nx = String(m.source || '').match(/nexus:(\d+)/), up = upOf(m);
       if (up && nx) acts.push(`<button class="btn sm primary" data-act="get" data-mod="${nx[1]}" data-file="${+up.fileId}" data-name="${h(m.name)}" title="Opens the new file on Nexus; click Slow download there">${ic('dl')}Update to v${h(String(up.version).replace(/^v/i, ''))}</button>`);
-      if (m.on && !m.fw) acts.push(`<button class="btn sm" data-act="issue-off" data-name="${h(m.name)}" title="Its files are set aside, not deleted. Turn it back on in the Library at any time.">Turn off</button>`);
+      // the other mods a message involves can be the one to turn off, so each gets the same choice
+      const others = (i.links || []).map(l => l && l.mod && findItem(l.mod)).filter((o, k, a) => o && o.on && !o.fw && o.name !== m.name && a.findIndex(x => x && x.name === o.name) === k);
+      const off = o => `<button class="btn sm" data-act="issue-off" data-name="${h(o.name)}" title="Its files are set aside, not deleted. Turn it back on in the Library at any time.">Turn off${others.length ? ' ' + h(short(o.name, 24)) : ''}</button>`;
+      if (m.on && !m.fw) acts.push(off(m));
       else if (!m.on) acts.push('<span class="pill muted">Off now</span>');
+      acts.push(...others.map(off));
     }
     if (i.log) acts.push(`<button class="btn sm ghost" data-act="open-log" data-path="${h(i.log)}" title="Open ${h(i.log)}">${ic('file')}Open log</button>`);
     if (i.file) acts.push(`<button class="btn sm ghost" data-act="reveal" data-path="${h(i.file)}" title="Show ${h(i.file)} in its folder">${ic('folder')}Show file</button>`);
@@ -1707,7 +1711,7 @@
   function paneTitle(p) {
     if (p.kind === 'mod') return p.data ? decode(p.data.mod.name) : 'Mod';
     if (p.kind === 'col') return p.data ? decode(p.data.name) : 'Collection';
-    return { profiles: 'Profiles', compat: 'Compatibility', discover: 'Find existing mods', gamelog: 'Game logs', log: 'Activity log', files: p.name || 'Files', crash: 'Crash report', preview: p.file || 'Archive', bisect: 'Find the problem mod', backups: 'Backups', keys: 'Key bindings', packs: 'Modpacks' }[p.kind] || 'Details';
+    return { profiles: 'Profiles', discover: 'Find existing mods', gamelog: 'Game logs', log: 'Activity log', files: p.name || 'Files', crash: 'Crash report', preview: p.file || 'Archive', bisect: 'Find the problem mod', backups: 'Backups', keys: 'Key bindings', packs: 'Modpacks' }[p.kind] || 'Details';
   }
   function renderPane(reset) {
     const box = $('#paneBox'), el = $('#pane'), strip = $('#paneStrip');
@@ -1748,7 +1752,6 @@
   function paneHtml(p) {
     if (p.kind === 'mod') return p.data ? modPane(p) : p.error ? paneHead('Mod') + `<div class="pane-body"><div class="err">${h(p.error)}</div></div>` : paneLoading('Loading mod');
     if (p.kind === 'col') return p.data ? colPane(p) : p.error ? paneHead('Collection') + `<div class="pane-body"><div class="err">${h(p.error)}</div></div>` : paneLoading('Loading collection');
-    if (p.kind === 'compat') return compatPane(p);
     if (p.kind === 'discover') return discoverPane(p);
     if (p.kind === 'log') return logPane(p);
     if (p.kind === 'gamelog') return gameLogPane(p);
@@ -2085,7 +2088,8 @@
 
   // tool panes
   function openTool(tool, mode) {
-    if (tool === 'compat') return runTool({ kind: 'compat' }, '/api/compat', d => { S.lib.compat = d; if (S.page === 'library') { renderLibSum(); renderLibList(); } }, mode);
+    // old links (#/library/tool/compat): it is a page now
+    if (tool === 'compat') return go('compat');
     if (tool === 'bisect') return openBisect(mode);
     if (tool === 'discover') return runTool({ kind: 'discover', sel: {}, open: {} }, '/api/discover', (d, p) => { (d.mods || []).forEach(m => { if (!m.vortex && !m.framework) p.sel[m.id] = true; }); }, mode);
     if (tool === 'gamelog') return runTool({ kind: 'gamelog' }, '/api/check', null, mode);
@@ -2098,7 +2102,7 @@
   async function runTool(p, url, after, mode) {
     p.loading = true;
     openPane(p, mode);
-    try { p.data = await api(url); if (after) after(p.data, p); } catch (e) { p.error = e.message; if (p.kind === 'compat') S.lib.compat = { error: e.message }; }
+    try { p.data = await api(url); if (after) after(p.data, p); } catch (e) { p.error = e.message; }
     p.loading = false;
     if (S.pane === p) renderPane();
   }
@@ -2106,26 +2110,40 @@
     return paneHead(title) + `<div class="pane-body"><h2>${h(title)}</h2><p class="muted" style="margin:0 0 16px">${intro}</p>${p.loading ? '<div class="callout neutral"><span class="spin"></span><div>Working on it. This can take a few seconds.</div></div>' : p.error ? `<div class="err">${h(p.error)}</div>` : inner()}</div>`;
   }
   const ISSUE_KIND = { requirement: 'Missing requirement', files: 'Same files', archive: 'Asset overlap', note: 'Author note', script: 'Script clash', tweak: 'Shared tweaks', outdated: 'Not updated' };
-  function compatPane(p) {
-    return toolShell(p, 'Compatibility', 'Looks for missing requirements, mods that install the same files or change the same game assets, script functions replaced twice, shared database tweaks and script mods not updated for the current patch. Each finding gets a risk level with the reasons behind it.', () => {
-      const d = p.data, all = d.issues || [], live = all.filter(i => !i.ignored), ign = all.filter(i => i.ignored);
+  function pageCompat(el) {
+    const L = S.lib, d = L.compat;
+    el.innerHTML = `<header class="page-head"><div class="ph-top">
+        <div><h1>Compatibility</h1><p class="sub">Missing requirements, mods that install the same files or change the same game assets, script functions replaced twice, shared database tweaks and script mods not updated for the current patch. Each finding gets a risk level with the reasons behind it.</p></div>
+        <div class="ph-actions"><button class="btn" data-act="compat-run"${L.compatLoading ? ' disabled' : ''}>${L.compatLoading ? '<span class="spin"></span>Checking' : ic('refresh') + 'Run again'}</button></div></div></header>
+      <div class="page-body">${!d ? '<div class="callout neutral"><span class="spin"></span><div>Checking your mods. This can take a few seconds.</div></div>' : d.error ? `<div class="err">${h(d.error)}</div>` : compatHtml(d)}</div>`;
+    ensureCompat(false);
+  }
+  function compatHtml(d) {
+      const all = d.issues || [], live = all.filter(i => !i.ignored), ign = all.filter(i => i.ignored);
       const by = r => live.filter(i => (i.risk || 'low') === r), hi = by('high'), me = by('medium'), lo = by('low'), ok = by('ok');
       const head = !live.length ? callout('ok', `<b>No problems found</b> across ${d.mods} mods and ${fmtNum(d.assets)} game assets.`)
         : callout(hi.length ? 'bad' : me.length ? 'warn' : 'ok', `<b>${hi.length} high, ${me.length} medium and ${lo.length} low risk${ok.length ? `, plus ${ok.length} intended overlap${ok.length === 1 ? '' : 's'}` : ''}.</b> High risk usually means something will not work. Low risk and intended overlaps can be left alone.`);
       const legend = `<div class="legend" style="margin:10px 0 4px">${['high', 'medium', 'low', 'ok'].map(r => `<span>${riskPill(r)} ${h({ high: 'likely breaks something', medium: 'worth a look', low: 'usually fine', ok: 'on purpose, leave it' }[r])}</span>`).join('')}</div>`;
       const group = (title, list, open) => list.length ? `<details class="risk-group"${open ? ' open' : ''}><summary>${h(title)} <span class="n">${list.length}</span></summary>${list.map(issueCard).join('')}</details>` : '';
       const rules = arr(d.loadOrder);
-      const loCard = rules.length ? `<div class="card lo-card"><div class="card-head"><h3>${ic('list')} Load order you changed</h3><span class="dim small">Renamed archives load first and win</span></div><div class="list">${rules.map(r => `<div class="li slim"><div class="li-main"><div class="li-title"><span class="t">${h(r.mod)}</span></div><div class="li-sub"><span class="mono-path">${h(r.name)}</span><span>loads before ${h(r.over)}</span></div></div><button class="btn sm ghost" data-act="lo-undo" data-archive="${h(r.name)}">${ic('undo')}Undo</button></div>`).join('')}</div></div>` : '';
-      return loCard + head + legend + group('High risk', hi, true) + group('Medium risk', me, true) + group('Low risk', lo, hi.length + me.length < 4) + group('Intended overlaps', ok, false) + group('Marked as fine', ign, false)
-        + `<div class="toolbar" style="margin-top:14px"><button class="btn" data-act="tool" data-tool="compat">${ic('refresh')}Run again</button><span class="dim small">Checked ${h(fmtTime(d.checked))}</span></div>`;
-    });
+      const loCard = rules.length ? `<div class="card lo-card"><div class="card-head"><h3>${ic('list')} Winners you chose</h3><span class="dim small">These archives load first and win; cpmods keeps it that way after updates</span></div><div class="list">${rules.map(r => `<div class="li slim"><div class="li-main"><div class="li-title"><span class="t">${h(r.mod)}</span></div><div class="li-sub"><span class="mono-path">${h(r.name)}</span><span>wins over ${h(arr(r.over).join(', '))}</span></div></div><button class="btn sm ghost" data-act="lo-undo" data-archive="${h(r.name)}">${ic('undo')}Undo</button></div>`).join('')}</div></div>` : '';
+      return loCard + head + legend + group('High risk', hi, true) + group('Medium risk', me, true) + group('Low risk', lo, hi.length + me.length < 4) + group('Intended overlaps and your choices', ok, false) + group('Marked as fine', ign, false)
+        + `<p class="dim small" style="margin-top:14px">Checked ${h(fmtTime(d.checked))}.</p>`;
+  }
+  // asset overlap: a "Let X win" for each mod (files[0] is the one that wins now); the one you chose shows as chosen
+  function winBtn(i, k) {
+    const name = i.mods[k];
+    if (!findItem(name)) return '';
+    if (i.chosen === name) return `<span class="pill ok" title="Undo it under Winners you chose">${h(short(name, 22))} wins, your choice</span>`;
+    const tip = k === 0 ? 'It wins now. This keeps it that way and settles this overlap.' : `Renames ${i.files[1]} with a ! in front so it loads first. cpmods keeps the name after updates; you can undo it.`;
+    return `<button class="btn sm" data-act="lo-win" data-archive="${h(i.files[k])}" data-over="${h(i.files[1 - k])}" data-mod="${h(name)}" title="${h(tip)}">Let ${h(short(name, 22))} win</button>`;
   }
   function issueCard(i) {
     const mods = (i.mods || []).map(n => findItem(n) ? `<button class="mchip sm" data-act="lib-open" data-name="${h(n)}">${h(n)}</button>` : `<span class="mchip sm static">${h(n)}</span>`).join('');
     return `<div class="issue ${h(i.risk || 'low')}${i.ignored ? ' ignored' : ''}"><div class="issue-top">${riskPill(i.risk)}<span class="pill">${h(ISSUE_KIND[i.kind] || i.kind)}</span><b>${h(i.title)}</b></div>
       ${(i.why || []).length ? `<ul class="why">${i.why.map(w => `<li>${h(w)}</li>`).join('')}</ul>` : ''}
       ${i.detail && i.kind !== 'archive' ? `<p class="issue-detail">${h(i.detail)}</p>` : ''}
-      <div class="issue-acts">${mods}<span class="spacer"></span>${i.kind === 'requirement' && i.reqId ? `<button class="btn sm primary" data-act="open-mod" data-id="${+i.reqId}">Get it</button>` : ''}${i.kind === 'archive' && arr(i.files).length === 2 && !i.ignored && findItem(i.mods[1]) ? `<button class="btn sm" data-act="lo-win" data-archive="${h(i.files[1])}" data-over="${h(i.files[0])}" data-mod="${h(i.mods[1])}" title="Renames ${h(i.files[1])} with a ! in front so it loads first. cpmods keeps the name after updates; you can undo it.">Let ${h(short(i.mods[1], 22))} win</button>` : ''}${i.key ? `<button class="btn sm ghost" data-act="compat-ignore" data-key="${h(i.key)}" data-on="${i.ignored ? '0' : '1'}" title="${i.ignored ? 'Count it again' : 'Hide it from the summary; it moves to Marked as fine'}">${i.ignored ? 'Undo' : 'Mark as fine'}</button>` : ''}</div></div>`;
+      <div class="issue-acts">${mods}<span class="spacer"></span>${i.kind === 'requirement' && i.reqId ? `<button class="btn sm primary" data-act="open-mod" data-id="${+i.reqId}">Get it</button>` : ''}${i.kind === 'archive' && arr(i.files).length === 2 && !i.ignored ? winBtn(i, 0) + winBtn(i, 1) : ''}${i.key ? `<button class="btn sm ghost" data-act="compat-ignore" data-key="${h(i.key)}" data-on="${i.ignored ? '0' : '1'}" title="${i.ignored ? 'Count it again' : 'Hide it from the summary; it moves to Marked as fine'}">${i.ignored ? 'Undo' : 'Mark as fine'}</button>` : ''}</div></div>`;
   }
   function discoverPane(p) {
     return toolShell(p, 'Find existing mods', 'Mods in your game folder that cpmods did not install, matched against Nexus. Adopting only starts tracking their files: nothing is moved or changed.', () => {
@@ -2230,7 +2248,9 @@
       const bad = (ln.notes || []).filter(x => x.level === 'error' || x.level === 'warn'), word = { error: 'had a problem', warn: 'worth a check', new: 'not tested yet (added after it)', ok: 'loaded fine', assets: 'assets, loaded by the game' }[ln.status] || ln.status;
       parts.push(`<div class="lb-launch ${h(ln.status)}">${ic(bad.length ? 'alert' : ln.status === 'new' ? 'info' : 'check')}<div><b>Last launch:</b> ${h(word)}${(bad.length ? bad : (ln.notes || []).slice(0, 2)).map(x => `<div class="dim small">${h(x.text)}${x.note ? ' ' + h(x.note) : ''}</div>`).join('')}</div></div>`);
     }
-    if (iss.length) parts.push(`<div class="lb-issues">${iss.map(i => `<button class="lb-issue" data-act="tool" data-tool="compat" title="Open the compatibility check">${riskPill(i.risk)}<span>${h(i.title)}</span></button>`).join('')}</div>`);
+    // only what can crash the game shows here; everything else is on the Compatibility page
+    const crash = iss.filter(crashy), rest = iss.length - crash.length;
+    if (iss.length) parts.push(`<div class="lb-issues">${crash.map(i => `<button class="lb-issue" data-act="go" data-page="compat" title="Open the Compatibility page">${riskPill(i.risk)}<span>${h(i.title)}</span></button>`).join('')}${rest ? `<button class="link-btn small" data-act="go" data-page="compat">${plural(rest, 'other compatibility note')}</button>` : ''}</div>`);
     if (d.files.length) {
       // collapsed by default (open by default in the files-only panel); the button says where the files go
       const fs = p.filesShown = p.filesShown || {}, open = m.name in fs ? fs[m.name] : p.kind === 'files';
@@ -2427,9 +2447,9 @@
   async function playCheck() {
     const s = S.st && S.st.settings, c = S.lib.compat;
     if (!s || s.warnRisk === false || !c || !c.issues) return true;
-    const hi = c.issues.filter(i => i.risk === 'high' && !i.ignored);
+    const hi = c.issues.filter(crashy);
     if (!hi.length) return true;
-    return ask({ title: 'Launch anyway?', body: `The compatibility check found ${plural(hi.length, 'high-risk problem')}:<ul class="ask-list">${hi.slice(0, 5).map(i => `<li>${h(i.title)}</li>`).join('')}</ul>Launching does not harm your files, but these mods may not work or may crash the game.`, ok: 'Launch anyway', cancel: 'Not now' });
+    return ask({ title: 'Launch anyway?', body: `The compatibility check found ${plural(hi.length, 'problem')} that can crash the game:<ul class="ask-list">${hi.slice(0, 5).map(i => `<li>${h(i.title)}</li>`).join('')}</ul>Launching does not harm your files, but these mods may not work or may crash the game.`, ok: 'Launch anyway', cancel: 'Not now' });
   }
   async function sys(op, extra) {
     if (op === 'quit' && !await ask({ title: 'Quit cpmods?', body: 'Running downloads finish first. Reopen it from the "Cyberpunk Mods" shortcut.', ok: 'Quit', danger: true })) return;
@@ -2503,9 +2523,10 @@
   async function compatIgnore(key, on) {
     try {
       await api('/api/compat', { op: 'ignore', key, on });
-      [S.lib.compat, S.pane && S.pane.kind === 'compat' ? S.pane.data : null].forEach(c => { if (c && c.issues) c.issues.forEach(i => { if (i.key === key) i.ignored = on; }); });
-      if (S.pane && S.pane.kind === 'compat') renderPane();
+      if (S.lib.compat && S.lib.compat.issues) S.lib.compat.issues.forEach(i => { if (i.key === key) i.ignored = on; });
+      if (S.page === 'compat') renderPage();
       if (S.page === 'library') { renderLibSum(); renderLibList(); }
+      renderNav();
       toast(on ? 'Marked as fine' : 'Counted again', '', 'ok', 2000);
     } catch (e) { toast('Could not save', e.message, 'bad'); }
   }
@@ -2845,17 +2866,15 @@
   async function loWin(t) {
     try {
       const r = await api('/api/loadorder', { op: 'win', archive: t.dataset.archive, over: t.dataset.over });
-      toast(`${t.dataset.mod} wins now`, `Its archive is now ${r.name}. cpmods keeps that name after updates.`, 'ok', 9000, { label: 'Undo', act: 'lo-undo', data: { archive: r.name } });
-      S.lib.compatStale = true;
-      if (S.pane && S.pane.kind === 'compat') openTool('compat', 'replace');
+      toast(`${t.dataset.mod} wins, as you chose`, r.name === t.dataset.archive ? 'It already loads first; cpmods remembers your choice.' : `Its archive is now ${r.name}. cpmods keeps that name after updates.`, 'ok', 9000, { label: 'Undo', act: 'lo-undo', data: { archive: r.name } });
+      ensureCompat(true);
     } catch (e) { toast('Could not change the load order', e.message, 'bad', 10000); }
   }
   async function loUndo(archive) {
     try {
       await api('/api/loadorder', { op: 'undo', archive });
-      toast('Load order change undone', '', 'ok', 4000);
-      S.lib.compatStale = true;
-      if (S.pane && S.pane.kind === 'compat') openTool('compat', 'replace');
+      toast('Choice undone', '', 'ok', 4000);
+      ensureCompat(true);
     } catch (e) { toast('Could not undo', e.message, 'bad', 10000); }
   }
 
@@ -2917,6 +2936,7 @@
     'lib-filter': t => { S.lib.filter = t.dataset.v; renderLibBody(); },
     'lib-updates': () => checkUpdates(),
     'upd-batch': () => updateSelected(),
+    'compat-run': () => ensureCompat(true),
     'lib-more': t => openMenu(t, [{ label: 'Key bindings', act: 'tool', data: { tool: 'keys' }, icon: 'key' }, { label: 'Find existing mods', act: 'tool', data: { tool: 'discover' }, icon: 'scan' }, { label: 'Check game logs', act: 'tool', data: { tool: 'gamelog' }, icon: 'info' }, { label: 'Update frameworks', act: 'fw-sync', icon: 'refresh' }, { label: 'Modpacks: share or get mods', act: 'tool', data: { tool: 'packs' }, icon: 'collections' }, '-', { label: 'Open game folder', act: 'sys', data: { op: 'folder' }, icon: 'folder' }]),
     'map-loc': t => { const o = S.lib.mapOpen, k = t.dataset.k; if (o.has(k)) o.delete(k); else o.add(k); renderLibList(); },
     'map-all': () => { const o = S.lib.mapOpen, ks = [...document.querySelectorAll('[data-act="map-loc"]')].map(b => b.dataset.k), all = ks.every(k => o.has(k)); ks.forEach(k => { if (all) o.delete(k); else o.add(k); }); renderLibList(); },
@@ -3255,7 +3275,7 @@
     if (!S.booted) { S.booted = true; S.sig = sig; renderPage(); if (S.pane) renderPane(); return; }
     if (sig !== S.sig) {
       S.sig = sig;
-      if (S.lib.compatStale && S.page === 'library') debounce('compat', () => ensureCompat(true), 1500);
+      if (S.lib.compatStale && (S.page === 'library' || S.page === 'compat')) debounce('compat', () => ensureCompat(true), 1500);
       if (S.page === 'discover') renderResults(true);
       else if (S.page === 'collections') renderColResults();
       else if (!typing()) { if (S.page === 'library') renderLibBody(); else if (S.page === 'downloads') { pageDownloads($('#page')); } else renderPage(); }

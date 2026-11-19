@@ -624,6 +624,29 @@ function Get-ProblemNote([string]$Folder, [string]$Text) {
     $null
 }
 
+# one log message across launches: source, mod and text without numbers (sizes, ids, addresses, line numbers change)
+function Get-MessageSig($P) { "$($P.source)|$($P.mod)|" + ("$($P.text)".ToLower() -replace '0x[0-9a-f]+|[0-9a-f]{16,}|\d+', '#') }
+
+# Sets .known on each problem: it also showed up in an earlier launch that closed normally, so it did not stop the
+# game and is not flagged again (new messages still are). Only clean launches teach; with no record yet, the
+# messages of a clean launch become the baseline. Record: state\known-messages.json, signature -> first clean launch.
+# shortcut: the record only grows (one line per distinct message); prune it if it ever reaches thousands of entries
+function Set-KnownMessages($Probs, [datetime]$Start, [bool]$Clean) {
+    $f = Join-Path (Get-CpPaths).state 'known-messages.json'
+    $known = if (Test-Path -LiteralPath $f) { try { Read-JsonFile $f } catch { $null } } else { $null }
+    $base = $Clean -and $known -isnot [Collections.IDictionary]
+    if ($known -isnot [Collections.IDictionary]) { $known = @{} }
+    # launch start as ticks (JSON turns ISO date strings back into dates); the baseline is 0, earlier than any launch,
+    # so it counts as known on every rebuild of this report too
+    $at = $Start.Ticks; $learned = $false
+    foreach ($p in $Probs) {
+        $sig = Get-MessageSig $p
+        if ($Clean -and -not $known.ContainsKey($sig)) { $known[$sig] = $(if ($base) { 0 } else { $at }); $learned = $true }
+        $p.known = $known.ContainsKey($sig) -and [long]$known[$sig] -lt $at
+    }
+    if ($learned) { try { Write-JsonFile $f $known } catch { } }
+}
+
 # other mods a log message points to: the mod a game file it names comes from
 function Get-FileLinks([string]$Text, [string]$Mod, $Maps) {
     $seen = [Collections.Generic.HashSet[string]]::new()
@@ -780,6 +803,8 @@ function Get-LaunchReport {
     }
     $rep.tweak = [ordered]@{ problems = @($probs | Where-Object { $_.source -eq 'TweakXL' }).Count }
 
+    Set-KnownMessages $probs $start ($res.result -eq 'clean')
+
     # per-mod status
     $cetLoaded = [Collections.Generic.HashSet[string]]::new([string[]]@($(if ($cet) { $cet.loaded } else { @() })), [StringComparer]::OrdinalIgnoreCase)
     $xlSet = [Collections.Generic.HashSet[string]]::new([string[]]@($xlLoaded), [StringComparer]::OrdinalIgnoreCase)
@@ -830,9 +855,10 @@ function Get-LaunchReport {
         $xmls = @($files | Where-Object { $_ -like 'r6\input\*.xml' })
         if ($xmls -and $docSet.Count) { $ok = @($xmls | Where-Object { $docSet.Contains($_) }); if ($ok) { $verified = $true; $notes.Add([ordered]@{ level = 'ok'; text = 'Input Loader loaded its key bindings' }) } }
         foreach ($p in @($probs | Where-Object { $_.mod -eq $m.name })) {
-            # a known, explained message is at most worth a check
-            $pl = if ($p.note -and $p.note -like 'Harmless*') { 'info' } elseif ($p.note) { 'warn' } else { $p.level }
-            $notes.Add([ordered]@{ level = $pl; text = "$($p.source): $($p.text)"; note = $p.note; file = $p.file; log = $p.log; links = @($p.links) })
+            # a message seen before in a clean launch, or a harmless one, is only noted; an explained one is at most worth a check
+            $pl = if ($p.known -or ($p.note -and $p.note -like 'Harmless*')) { 'info' } elseif ($p.note) { 'warn' } else { $p.level }
+            $nt = if ($p.known -and -not $p.note) { 'Also in an earlier launch that closed normally.' } else { $p.note }
+            $notes.Add([ordered]@{ level = $pl; text = "$($p.source): $($p.text)"; note = $nt; file = $p.file; log = $p.log; links = @($p.links) })
             if ($pl -eq 'error' -and $order['error'] -lt $order[$lvl]) { $lvl = 'error' }
             elseif ($pl -eq 'warn' -and $order['warn'] -lt $order[$lvl]) { $lvl = 'warn' }
         }
@@ -865,12 +891,14 @@ function Get-LaunchReport {
         $first = @($m.notes | Where-Object { $_.level -eq 'warn' })[0]
         $iss.Add([ordered]@{ level = 'warn'; kind = 'mod'; title = "Check $($m.name)"; detail = "$($first.text)$(if ($first.note) { " $($first.note)" })"; msg = $first.text; mods = @($m.name); log = $first.log; file = $first.file; links = @($first.links) })
     }
-    $orphan = @($probs | Where-Object { -not $_.mod -and $_.level -eq 'error' -and -not $_.note })
+    $orphan = @($probs | Where-Object { -not $_.mod -and $_.level -eq 'error' -and -not $_.note -and -not $_.known })
     if ($orphan.Count) { $iss.Add([ordered]@{ level = 'warn'; title = "$($orphan.Count) error$(if ($orphan.Count -ne 1) { 's' }) not linked to a mod"; detail = (@($orphan | Select-Object -First 3 | ForEach-Object { "$($_.source): $($_.text)" }) -join ' | '); log = $orphan[0].log }) }
     $harmless = @($probs | Where-Object { $_.note -like 'Harmless*' })
     if ($harmless.Count) { $iss.Add([ordered]@{ level = 'info'; title = "$($harmless.Count) harmless warning$(if ($harmless.Count -ne 1) { 's' })"; detail = 'Messages that look scary in the logs but need no action (for example optional add-ons for mods you do not have).' }) }
+    $seen = @($probs | Where-Object { $_.known -and -not ($_.note -like 'Harmless*') })
+    if ($seen.Count) { $iss.Add([ordered]@{ level = 'info'; title = "$($seen.Count) known message$(if ($seen.Count -ne 1) { 's' })"; detail = 'They also showed up in an earlier launch that closed normally, so they are not flagged again. Each mod still lists them on the Mods tab.' }) }
     if ($untested.Count) { $iss.Add([ordered]@{ level = 'info'; title = "$($untested.Count) mod$(if ($untested.Count -ne 1) { 's' }) added since this launch"; detail = 'Launch once to test them: ' + (@($untested | Select-Object -First 6) -join ', ') + $(if ($untested.Count -gt 6) { ', ...' } else { '' }); mods = @($untested) }) }
-    if ($res.result -eq 'clean' -and -not ($iss | Where-Object { $_.level -in 'bad', 'warn' })) { $iss.Insert(0, [ordered]@{ level = 'ok'; title = 'Everything loaded and the game closed normally'; detail = 'No errors in the mod logs.' }) }
+    if ($res.result -eq 'clean' -and -not ($iss | Where-Object { $_.level -in 'bad', 'warn' })) { $iss.Insert(0, [ordered]@{ level = 'ok'; title = 'Everything loaded and the game closed normally'; detail = $(if ($seen.Count) { 'No new messages in the mod logs.' } else { 'No errors in the mod logs.' }) }) }
     $rep.issues = @($iss)
     $rep.problems = @($probs)
 
@@ -879,14 +907,14 @@ function Get-LaunchReport {
     $stg.Add([ordered]@{ key = 'start'; title = 'Game started'; status = 'ok'; detail = "Version $($last.product) at $($start.ToString('HH:mm, d MMM'))" })
     $pluginMods = @($s.mods | Where-Object { @($_.files) -like 'red4ext\plugins\*.dll' }).Count
     $plugErr = $plugFail.Count
-    $stg.Add([ordered]@{ key = 'red4ext'; title = 'RED4ext loaded native plugins'; status = $(if (-not $last.version) { 'skip' } elseif ($plugErr) { 'bad' } elseif (@($last.problems).Count) { 'warn' } else { 'ok' }); detail = "$($last.plugins.Count) plugin$(if ($last.plugins.Count -ne 1) { 's' }) loaded$(if ($pluginMods) { " ($pluginMods installed with plugins)" })$(if ($plugErr) { ", $plugErr failed" })" })
-    $cetErr = @($probs | Where-Object { $_.source -eq 'Cyber Engine Tweaks' }).Count
+    $stg.Add([ordered]@{ key = 'red4ext'; title = 'RED4ext loaded native plugins'; status = $(if (-not $last.version) { 'skip' } elseif ($plugErr) { 'bad' } elseif (@($probs | Where-Object { $_.source -eq 'RED4ext' -and -not $_.known }).Count) { 'warn' } else { 'ok' }); detail = "$($last.plugins.Count) plugin$(if ($last.plugins.Count -ne 1) { 's' }) loaded$(if ($pluginMods) { " ($pluginMods installed with plugins)" })$(if ($plugErr) { ", $plugErr failed" })" })
+    $cetErr = @($probs | Where-Object { $_.source -eq 'Cyber Engine Tweaks' -and -not $_.known }).Count
     $stg.Add([ordered]@{ key = 'cet'; title = 'Cyber Engine Tweaks loaded Lua mods'; status = $(if (-not $cet -or -not $cet.ran) { 'skip' } elseif ($cetErr) { 'warn' } else { 'ok' }); detail = $(if ($cet -and $cet.ran) { "$(@($cet.loaded).Count) mods loaded$(if ($cetErr) { ", $cetErr error line$(if ($cetErr -ne 1) { 's' })" })" } else { 'Not seen in this launch' }) })
     $rsErr = @($probs | Where-Object { $_.source -eq 'redscript' -and $_.level -eq 'error' }).Count
-    $stg.Add([ordered]@{ key = 'scripts'; title = 'redscript compiled script mods'; status = $(if (-not $rs -or -not $rs.thisLaunch) { 'skip' } elseif ($rs.status -eq 'failed' -or $last.scc -eq 'failed') { 'bad' } elseif (@($rs.warnings).Count) { 'warn' } else { 'ok' }); detail = $(if ($rs -and $rs.thisLaunch) { "$(@($rs.files).Count) files$(if ($rs.status -eq 'ok') { ', compiled fine' } elseif ($rsErr) { ", $rsErr error$(if ($rsErr -ne 1) { 's' })" })$(if (@($rs.warnings).Count) { ", $(@($rs.warnings).Count) warning$(if (@($rs.warnings).Count -ne 1) { 's' })" })" } else { 'No compile log from this launch' }) })
-    $twBad = @($probs | Where-Object { $_.source -eq 'TweakXL' -and -not ($_.note -like 'Harmless*') })
+    $stg.Add([ordered]@{ key = 'scripts'; title = 'redscript compiled script mods'; status = $(if (-not $rs -or -not $rs.thisLaunch) { 'skip' } elseif ($rs.status -eq 'failed' -or $last.scc -eq 'failed') { 'bad' } elseif (@($probs | Where-Object { $_.source -eq 'redscript' -and -not $_.known }).Count) { 'warn' } else { 'ok' }); detail = $(if ($rs -and $rs.thisLaunch) { "$(@($rs.files).Count) files$(if ($rs.status -eq 'ok') { ', compiled fine' } elseif ($rsErr) { ", $rsErr error$(if ($rsErr -ne 1) { 's' })" })$(if (@($rs.warnings).Count) { ", $(@($rs.warnings).Count) warning$(if (@($rs.warnings).Count -ne 1) { 's' })" })" } else { 'No compile log from this launch' }) })
+    $twBad = @($probs | Where-Object { $_.source -eq 'TweakXL' -and -not ($_.note -like 'Harmless*') -and -not $_.known })
     $stg.Add([ordered]@{ key = 'tweaks'; title = 'TweakXL applied database edits'; status = $(if (-not $fwv.Contains('TweakXL')) { 'skip' } elseif (@($twBad | Where-Object level -EQ 'error').Count) { 'warn' } else { 'ok' }); detail = $(if ($twBad.Count) { "$($twBad.Count) message$(if ($twBad.Count -ne 1) { 's' }) to check" } else { 'No problems' }) })
-    $xlBad = @($probs | Where-Object { $_.source -eq 'ArchiveXL' -and -not ($_.note -like 'Harmless*') })
+    $xlBad = @($probs | Where-Object { $_.source -eq 'ArchiveXL' -and -not ($_.note -like 'Harmless*') -and -not $_.known })
     $modArch = @(Get-ChildItem -LiteralPath (Join-Path $g 'archive\pc\mod') -Filter *.archive -File -ErrorAction SilentlyContinue).Count
     $stg.Add([ordered]@{ key = 'archives'; title = 'Game loaded asset mods (ArchiveXL added its rules)'; status = $(if ($xlBad.Count) { 'warn' } else { 'ok' }); detail = "$modArch .archive files in archive\pc\mod, $($xlLoaded.Count) ArchiveXL rule files$(if ($xlBad.Count) { ", $($xlBad.Count) to check" })" })
     $endTitle = switch ($res.result) { 'clean' { 'Closed normally' } 'crash' { 'Crashed' } 'running' { 'Still running' } default { 'Stopped without a normal exit' } }
@@ -1156,6 +1184,9 @@ function Test-ModCompat([hashtable]$Loaded) {
         try { Add-CpRdarType; $loc = [CpRdar]::Locate([string[]]$base, [uint64[]]@($want)); foreach ($kv in $loc.GetEnumerator()) { $where[$kv.Key] = $kv.Value } } catch { }
     }
     $prefixRx = '^(#+|!+|_+|\d+[\s_\-.]|z{1,3}(?=[A-Z_\-\s])|z{2,})'
+    # overlaps you settled with "Let X win": "winner file|loser file"
+    $chosen = @{}
+    foreach ($x in (Get-LoadOrderRules).Values) { foreach ($o in @($x.over)) { if ($o) { $chosen["$($x.name)|$o"] = $true } } }
     foreach ($key in $ov.Keys) {
         $win, $lose = $key -split '\|'
         $A = $label[$win]; $B = $label[$lose]
@@ -1190,7 +1221,9 @@ function Test-ModCompat([hashtable]$Loaded) {
         $pref = @($win, $lose | Where-Object { $_ -cmatch $prefixRx })
         if ($pref -and $risk -ne 'ok') { $risk = Step-Risk $risk -1; $why.Add("$($pref[0]) starts with a load-order prefix (#, !, z), a sign the author chose on purpose which one wins.") }
         elseif ($pref) { $why.Add("$($pref[0]) starts with a load-order prefix, so the author chose which one wins.") }
-        $issues.Add([ordered]@{ kind = 'archive'; level = 'warn'; mods = @($A, $B); risk = $risk; why = @($why); winner = $A; files = @($win, $lose); areas = $areaList
+        $pick = [bool]$chosen["$win|$lose"]
+        if ($pick) { $risk = 'ok'; $why.Add("You chose $A to win.") }
+        $issues.Add([ordered]@{ kind = 'archive'; level = 'warn'; mods = @($A, $B); risk = $risk; why = @($why); winner = $A; chosen = $(if ($pick) { $A } else { $null }); files = @($win, $lose); areas = $areaList
                 title = "$A and $B change the same game assets"
                 detail = "$n shared asset(s). $win loads first, so $A probably wins for those and $B loses its version of them." })
     }

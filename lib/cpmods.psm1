@@ -792,14 +792,21 @@ function Set-ArchiveWinner([string]$Archive, [string]$Over) {
     $s = Get-State
     $m = $s.mods | Where-Object { @($_.files) -contains "archive\pc\mod\$Archive" } | Select-Object -First 1
     if (-not $m) { throw "$Archive is not managed by cpmods" }
-    $p = '!'
-    while ([string]::CompareOrdinal("$p$orig", $Over) -ge 0 -or [StringComparer]::OrdinalIgnoreCase.Compare("$p$orig", $Over) -ge 0) { $p += '!'; if ($p.Length -gt 16) { throw "No name sorts before $Over" } }
-    $to = "$p$orig"
-    if ($to -ne $Archive) { Rename-ModArchive $s $Archive $to }
-    $r[$orig.ToLower()] = [ordered]@{ orig = $orig; name = $to; over = $Over; mod = $m.name; at = (Get-Date).ToString('s') }
+    $first = { param($n) [string]::CompareOrdinal($n, $Over) -lt 0 -and [StringComparer]::OrdinalIgnoreCase.Compare($n, $Over) -lt 0 }
+    # already loading first: nothing is renamed, the choice is only remembered
+    if (& $first $Archive) { $to = $Archive }
+    else {
+        $p = '!'
+        while (-not (& $first "$p$orig")) { $p += '!'; if ($p.Length -gt 16) { throw "No name sorts before $Over" } }
+        $to = "$p$orig"
+        Rename-ModArchive $s $Archive $to
+    }
+    # every archive it was chosen over (one per settled overlap)
+    $beaten = @(@($(if ($k) { $r[$k].over })) + $Over | Where-Object { $_ } | Select-Object -Unique)
+    $r[$orig.ToLower()] = [ordered]@{ orig = $orig; name = $to; over = $beaten; mod = $m.name; at = (Get-Date).ToString('s') }
     Write-JsonFile (Join-Path $script:StateDir 'loadorder.json') $r
     Save-State $s
-    Write-Note "Load order: $to now loads before $Over ($($m.name) wins)"
+    Write-Note "Load order: $to $(if ($to -eq $Archive -and $to -eq $orig) { 'already loads' } else { 'now loads' }) before $Over ($($m.name) wins, your choice)"
     $to
 }
 function Reset-ArchiveName([string]$Archive) {
@@ -809,7 +816,7 @@ function Reset-ArchiveName([string]$Archive) {
     if (-not $k) { throw "No load order change for $Archive" }
     $x = $r[$k]
     $s = Get-State
-    if (Test-Path -LiteralPath (Join-Path $script:Game "archive\pc\mod\$($x.name)")) { Rename-ModArchive $s $x.name $x.orig; Save-State $s }
+    if ($x.name -ne $x.orig -and (Test-Path -LiteralPath (Join-Path $script:Game "archive\pc\mod\$($x.name)"))) { Rename-ModArchive $s $x.name $x.orig; Save-State $s }
     $r.Remove($k)
     Write-JsonFile (Join-Path $script:StateDir 'loadorder.json') $r
     Write-Note "Load order: $($x.orig) has its own name again"

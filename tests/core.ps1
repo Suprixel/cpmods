@@ -425,6 +425,34 @@ try {
         Check ((@(Invoke-Frameworks -Names 'FwB') -join ',') -eq 'did FwB' -and (@(Invoke-Frameworks) -join ',') -eq 'did FwA,did FwB' -and (@(Invoke-Frameworks -Names @()) -join ',') -eq 'did FwA,did FwB') 'T29 -Names limits the update; none named = all'
     }
     finally { & (Get-Module cpmods) { param($f) Set-Item function:script:Install-GitHubFramework $f } $origFw; '[]' | Set-Content "$Sb\frameworks.json" }
+
+    Write-Host '--- T30: choosing the winner that already wins renames nothing and is remembered; known log messages'
+    Install-ModArchive (New-TestMod 'Win1' @{ 'archive\pc\mod\aaa_win.archive' = 'w1' }) (& $meta 'Win1') | Out-Null
+    Install-ModArchive (New-TestMod 'Win2' @{ 'archive\pc\mod\bbb_win.archive' = 'w2' }) (& $meta 'Win2') | Out-Null
+    $n = Set-ArchiveWinner 'aaa_win.archive' 'bbb_win.archive'
+    Check ($n -eq 'aaa_win.archive' -and (Test-Path "$g\archive\pc\mod\aaa_win.archive") -and (@((Get-LoadOrderRules)['aaa_win.archive'].over) -join ',') -eq 'bbb_win.archive') 'T30 the winner keeps its name; the choice is recorded'
+    [void](Set-ArchiveWinner 'aaa_win.archive' 'ccc.archive')
+    Check ((@((Get-LoadOrderRules)['aaa_win.archive'].over) -join ',') -eq 'bbb_win.archive,ccc.archive') 'T30 a second choice adds to it'
+    [void](Reset-ArchiveName 'aaa_win.archive')
+    Check ((Test-Path "$g\archive\pc\mod\aaa_win.archive") -and -not (Get-LoadOrderRules).Contains('aaa_win.archive')) 'T30 undoing a choice that renamed nothing works'
+    Check ((Set-ArchiveWinner 'bbb_win.archive' 'aaa_win.archive') -eq '!bbb_win.archive' -and (Test-Path "$g\archive\pc\mod\!bbb_win.archive")) 'T30 the other one still gets the ! prefix to win'
+    [void](Reset-ArchiveName '!bbb_win.archive')
+    Remove-Item "$Sb\state\known-messages.json" -ErrorAction SilentlyContinue
+    $mk = { param($t) [ordered]@{ source = 'Cyber Engine Tweaks'; mod = 'M'; text = $t; level = 'error' } }
+    $t0 = (Get-Date).AddDays(-3); $t1 = $t0.AddDays(1); $t2 = $t1.AddDays(1)
+    $a = @(& $mk 'init.lua:87: nil value at 0x1234')
+    Set-KnownMessages $a $t0 $true
+    Check ($a[0].known) 'T30 first clean launch with no record: its messages become the baseline'
+    $b = @((& $mk 'init.lua:90: nil value at 0x9F9F'), (& $mk 'brand new error'))
+    Set-KnownMessages $b $t1 $true
+    Check ($b[0].known -and -not $b[1].known) 'T30 the same message with other numbers is known; a new one is flagged'
+    Set-KnownMessages $b $t1 $true
+    Check (-not $b[1].known) 'T30 rebuilding the same report still flags the new one'
+    $c = @((& $mk 'brand new error'), (& $mk 'only after a crash'))
+    Set-KnownMessages $c $t2 $false
+    Check ($c[0].known -and -not $c[1].known) 'T30 the next launch knows it; a crash launch teaches nothing'
+    Set-KnownMessages @($c[1]) $t2.AddHours(1) $true
+    Check (-not $c[1].known -and (Get-Content "$Sb\state\known-messages.json" -Raw) -match 'only after a crash') 'T30 a clean launch learns it (flagged this once)'
 }
 catch { $script:fails++; Write-Host "FAIL (stopped): $($_.Exception.Message)" -ForegroundColor Red }
 finally {
