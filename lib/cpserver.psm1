@@ -520,7 +520,10 @@ function Invoke-CpRequest {
             'GET /api/modlist' { Send-Json $Ctx (Export-ModList) }
             'POST /api/pack' {
                 switch ("$($b.op)") {
-                    'make' { Send-Json $Ctx (ConvertTo-PackCode "$($b.name)") }
+                    'make' {
+                        $long = ConvertTo-PackCode "$($b.name)"
+                        Send-Json $Ctx @{ code = (ConvertTo-PackCode "$($b.name)" -Short).code; long = $long.code; count = $long.count }
+                    }
                     'plan' { Send-Json $Ctx (Get-PackPlan (Read-ModPack "$($b.code)" $b.list)) }
                     'apply' {
                         $pk = Read-ModPack "$($b.code)" $b.list

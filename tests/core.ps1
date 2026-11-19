@@ -340,6 +340,8 @@ try {
     $big = @(1..125 | ForEach-Object { [ordered]@{ modId = $_ * 299; fileId = 30000 + $_ * 1200; sub = $(if ($_ -eq 7) { 'Variant B\files' } else { $null }) } })
     $bc = (ConvertTo-PackCode 'Big' $big).code; $bb = Read-ModPack $bc
     Check ($bc.Length -lt 1000 -and @($bb.mods).Count -eq 125 -and $bb.mods[6].sub -eq 'Variant B\files' -and $bb.mods[124].fileId -eq 180000) "T28 125 mods fit in a chat message: $($bc.Length) characters"
+    $sc = (ConvertTo-PackCode 'Big' $big -Short).code; $sb2 = Read-ModPack $sc
+    Check ($sc.Length -lt 0.45 * $bc.Length -and @($sb2.mods).Count -eq 125 -and -not @($sb2.mods | Where-Object { $_.modId }).Count -and $sb2.mods[6].sub -eq 'Variant B\files' -and $sb2.mods[124].fileId -eq 180000) "T28 short code holds only file ids: $($sc.Length) characters (long: $($bc.Length))"
     Check (@((Read-ModPack "here is my pack: $($made.code) have fun").mods).Count -eq 3) 'T28 the code is found inside a pasted message'
     Check (@((Read-ModPack (($made.code -split '(.{20})' | Where-Object { $_ }) -join "`r`n")).mods).Count -eq 3) 'T28 a code wrapped over lines still reads'
     $typo = $made.code.ToCharArray(); $typo[12] = $(if ($typo[12] -ceq 'a') { 'b' } else { 'a' })
@@ -372,12 +374,20 @@ try {
         function script:Invoke-NexusGql([string]$Query) {
             $d = @{ legacyModsByDomain = @{ nodes = @(foreach ($m in [regex]::Matches($Query, 'modId: (\d+)\}')) { $x = $script:FakeNx[[int]$m.Groups[1].Value]; if ($x) { @{ modId = [int]$m.Groups[1].Value; name = $x[0] } } }) } }
             foreach ($m in [regex]::Matches($Query, 'm(\d+): modFiles')) { $x = $script:FakeNx[[int]$m.Groups[1].Value]; $d["m$($m.Groups[1].Value)"] = $(if ($x) { $x[1] } else { @() }) }
+            # file uid = game id << 32 | file id
+            $d.modFilesByUid = @{ nodes = @(foreach ($m in [regex]::Matches($Query, '"(\d+)"')) {
+                        $fid = [long]$m.Groups[1].Value - ([long]3333 -shl 32)
+                        foreach ($k in $script:FakeNx.Keys) { if (@($script:FakeNx[$k][1] | Where-Object { $_.fileId -eq $fid }).Count) { @{ fileId = $fid; modId = $k } } }
+                    }) }
             $d
         }
     } $fake
     try {
-        $code = (ConvertTo-PackCode 'Friends' @(@{ modId = 9001; fileId = 1 }, @{ modId = 9002; fileId = 21 }, @{ modId = 9003; fileId = 29 }, @{ modId = 9004; fileId = 40 }, @{ modId = 9005; fileId = 50 },
-                @{ modId = 9006; fileId = 60 }, @{ modId = 9007; fileId = 70 }, @{ modId = 9008; fileId = 80 }, @{ modId = 9008; fileId = 81 }, @{ modId = 9009; fileId = 90 })).code
+        $fl = @(@{ modId = 9001; fileId = 1 }, @{ modId = 9002; fileId = 21 }, @{ modId = 9003; fileId = 29 }, @{ modId = 9004; fileId = 40 }, @{ modId = 9005; fileId = 50 },
+            @{ modId = 9006; fileId = 60 }, @{ modId = 9007; fileId = 70 }, @{ modId = 9008; fileId = 80 }, @{ modId = 9008; fileId = 81 }, @{ modId = 9009; fileId = 90 })
+        $code = (ConvertTo-PackCode 'Friends' $fl).code
+        $sp = Get-PackPlan (Read-ModPack (ConvertTo-PackCode 'Friends' $fl -Short).code)
+        $sig = { param($x) "$(@($x.have) -join ',')|$(@($x.turnOn) -join ',')|$(@($x.versions | ForEach-Object { "$($_.name)>$($_.fileId)" }) -join ',')|$(@($x.new | ForEach-Object { "$($_.name)>$($_.modId)/$($_.fileId)" } | Sort-Object) -join ',')" }
         '[{"name":"FwX","repo":"none/none","asset":"x"}]' | Set-Content "$Sb\frameworks.json"
         $pl = Get-PackPlan (Read-ModPack $code)
         '[]' | Set-Content "$Sb\frameworks.json"
@@ -386,6 +396,7 @@ try {
         Check ((& $vs 'PackOld').newer -and -not (& $vs 'PackOld').older -and (& $vs 'PackOld').pack -eq '2.0' -and (& $vs 'PackKeep').older -and -not (& $vs 'PackKeep').newer) 'T28 plan: the pack has PackOld newer, PackKeep older (matched by its file name)'
         Check ((@($pl.new | ForEach-Object name) -join ',') -eq 'Brand new,ModD (9006),Twin - Twin A,Twin - Twin B' -and ($pl.new | Where-Object fileId -eq 50).version -eq '3.1') "T28 plan: new mods named from Nexus, a clashing name kept apart, two files of one mod: $(($pl.new | ForEach-Object name) -join ', ')"
         Check ((@($pl.gone) -join ',') -eq 'Was removed (file 70),Nexus mod 9009') "T28 plan: removed and unknown files are skipped: $(@($pl.gone) -join ', ')"
+        Check ((& $sig $sp) -eq (& $sig $pl) -and (@($sp.gone) -join ',') -eq 'Was removed (file 70),Nexus file 90') "T28 a short code plans the same as the long one: $(& $sig $sp) / gone $(@($sp.gone) -join ', ')"
         # "Update my mods": the pack's version only where it is newer
         $pts = @(Get-RestorePoints).Count
         [void](Invoke-ModPack (Read-ModPack $code) @(@($pl.versions | Where-Object newer | ForEach-Object name)))

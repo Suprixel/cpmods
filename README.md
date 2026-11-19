@@ -14,7 +14,7 @@ A simple mod manager for Cyberpunk 2077 on Windows. Find mods on Nexus, click "S
 - **Disk space.** How much your mods and cpmods' own data take, the largest mods, and a cleanup of downloads no mod or restore point uses. After an update, a mod's two previous downloads stay so you can go back; older ones are deleted.
 - **Your look.** Yellow, red or your own color, on a matching, grey, black, OLED black, white or custom background.
 - **Load order and conflicts.** A compatibility check, archive load order (who wins a conflict), and a map of every key binding used by the game and your mods.
-- **Modpacks.** Turn the mods you have on into a short code of letters and digits (about 800 characters for 125 mods) to paste in any chat. A friend pastes it, or the whole message, in Downloads, Modpacks: cpmods looks the mods up on Nexus, shows what changes, skips mods they already have, updates their older versions (or keeps them, their choice), makes a restore point and a mod settings backup, then queues the downloads. A mistyped or cut code is refused.
+- **Modpacks.** Turn the mods you have on into a short code of letters and digits (about 300 characters for 125 mods; a longer code that also lists each file's mod is there too) to paste in any chat. A friend pastes it, or the whole message, in Downloads, Modpacks: cpmods looks the mods up on Nexus, shows what changes, skips mods they already have, updates their older versions (or keeps them, their choice), makes a restore point and a mod settings backup, then queues the downloads. A mistyped or cut code is refused.
 - **Share with friends.** One click makes a zip with the app and your mod list (optionally your mod settings).
 
 ## Install

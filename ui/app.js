@@ -2613,7 +2613,7 @@
         <div class="card" style="margin-top:12px"><div class="card-head"><h3>Share your mods</h3></div><div class="card-body">
           <div class="keyrow prof-new"><input type="text" id="pack-name" maxlength="60" spellcheck="false" placeholder="A name for your modpack (optional)" aria-label="Modpack name" value="${h(p.name || '')}"><button class="btn sm primary" data-act="pack-make">Make a code</button></div>
           ${p.code ? `<textarea class="pack-code" id="pack-out" rows="4" readonly aria-label="Your modpack code">${h(p.code)}</textarea>
-          <div class="toolbar" style="margin-top:10px"><button class="btn sm primary" data-act="pack-copy">Copy the code</button><span class="dim small">${plural(p.count, 'mod')}, ${p.code.length} characters.${p.code.length > 2000 ? ' Discord sends a code this long as a file: your friend opens it and copies the text.' : ''}</span></div>`
+          <div class="toolbar" style="margin-top:10px"><button class="btn sm primary" data-act="pack-copy">Copy the code</button><button class="btn sm ghost" data-act="pack-copy" data-long="1" title="Also lists each file's mod, so it does not need Nexus to find them. Works with cpmods 1.4.0 too.">Copy the long code</button><span class="dim small">${plural(p.count, 'mod')}, ${p.code.length} characters (long code: ${p.long.length}).${p.code.length > 2000 ? ' Discord sends a code this long as a file: your friend opens it and copies the text.' : ''}</span></div>`
           : '<p class="dim small" style="margin:0">The code lists the Nexus mods you have on, with their versions. Frameworks are left out: cpmods installs them by itself.</p>'}
           <div class="toolbar" style="margin-top:10px"><button class="btn sm ghost" data-act="modlist-export">Save as a file instead</button></div></div></div>`;
     });
@@ -2656,14 +2656,14 @@
   async function packMake() {
     const p = S.pane;
     if (!p || p.kind !== 'packs') return;
-    try { const r = await api('/api/pack', { op: 'make', name: ($('#pack-name') || {}).value || '' }); p.code = r.code; p.count = r.count; renderPane(); }
+    try { const r = await api('/api/pack', { op: 'make', name: ($('#pack-name') || {}).value || '' }); p.code = r.code; p.long = r.long; p.count = r.count; renderPane(); }
     catch (e) { toast('Could not make a code', e.message, 'bad', 8000); }
   }
-  async function packCopy() {
-    const t = $('#pack-out');
-    if (!t) return;
-    try { await navigator.clipboard.writeText(t.value); toast('Code copied', 'Your friend pastes it in cpmods: Downloads, Modpacks.', 'ok', 5000); }
-    catch (e) { t.focus(); t.select(); toast('Press Ctrl+C to copy', 'The code is selected.', '', 5000); }
+  async function packCopy(long) {
+    const t = $('#pack-out'), p = S.pane;
+    if (!t || !p) return;
+    try { await navigator.clipboard.writeText(long ? p.long : p.code); toast(long ? 'Long code copied' : 'Code copied', 'Your friend pastes it in cpmods: Downloads, Modpacks.', 'ok', 5000); }
+    catch (e) { t.value = long ? p.long : p.code; t.focus(); t.select(); toast('Press Ctrl+C to copy', 'The code is selected.', '', 5000); }
   }
 
   // groups of mod names in a "what changes" list (restore points, profiles, modpacks)
@@ -2911,7 +2911,7 @@
     'prof-del': t => profDelete(t.dataset.name),
     'pack-check': () => { const c = (($('#pack-code') || {}).value || '').trim(); if (c) packFlow({ code: c }); else toast('Paste a code first', 'It starts with CPMODS.', 'warn', 4000); },
     'pack-make': () => packMake(),
-    'pack-copy': () => packCopy(),
+    'pack-copy': t => packCopy(!!t.dataset.long),
     'disk-refresh': () => { S.disk = null; const el = $('#disk-now'); if (el) el.innerHTML = diskHtml(); loadDisk(); },
     'row-menu': t => {
       const m = findItem(t.dataset.name);

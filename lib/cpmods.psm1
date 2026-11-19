@@ -1355,23 +1355,26 @@ function Export-ModList {
 # Modpack code: "CPMODS" + base62 (letters and digits only: chats cannot reformat it, a double-click selects all of it).
 # Bytes: format 2, name, game version, count, then per mod (sorted) the modId gap * 2 (+1 when a sub folder follows) and
 # the fileId as varints, then 2 bytes of SHA-256 (a mistyped code is refused) and 0x01 (keeps leading zero bytes).
+# -Short (format 3): only fileId gaps (about a third of the length); Resolve-PackMods asks Nexus for each file's mod.
 # Names and versions are not in the code: Resolve-PackMods reads them from Nexus.
 $script:PackTag = 'CPMODS'
 $script:B62 = '0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz'
-function ConvertTo-PackCode([string]$Name, $Mods = (Export-ModList).mods) {
+function ConvertTo-PackCode([string]$Name, $Mods = (Export-ModList).mods, [switch]$Short) {
     $Name = "$Name".Trim()
     if ($Name.Length -gt 60) { throw 'Give the modpack a name of up to 60 characters' }
-    $Mods = @($Mods | Sort-Object { [int]$_.modId }, { [int]$_.fileId })
+    $key = if ($Short) { 'fileId' } else { 'modId' }
+    $Mods = @($Mods | Sort-Object { [int]$_.$key }, { [int]$_.fileId })
     if (-not $Mods.Count) { throw 'No Nexus mods are on, so there is nothing to share' }
     $w = [IO.MemoryStream]::new()
     $num = { param([long]$v) do { $b = [byte]($v -band 0x7F); $v = $v -shr 7; if ($v) { $b = $b -bor 0x80 }; $w.WriteByte($b) } while ($v) }
     $str = { param([string]$s) $b = [Text.Encoding]::UTF8.GetBytes($s); & $num $b.Length; $w.Write($b, 0, $b.Length) }
-    $w.WriteByte(2); & $str $Name; & $str "$((Get-GameState).version)"; & $num $Mods.Count
+    $w.WriteByte($(if ($Short) { 3 } else { 2 })); & $str $Name; & $str "$((Get-GameState).version)"; & $num $Mods.Count
     $prev = 0
     foreach ($m in $Mods) {
-        & $num (((([long]$m.modId) - $prev) -shl 1) -bor [long][bool]$m.sub); & $num ([long]$m.fileId)
+        & $num (((([long]$m.$key) - $prev) -shl 1) -bor [long][bool]$m.sub)
+        if (-not $Short) { & $num ([long]$m.fileId) }
         if ($m.sub) { & $str "$($m.sub)" }
-        $prev = [long]$m.modId
+        $prev = [long]$m.$key
     }
     $body = $w.ToArray()
     $n = [Numerics.BigInteger]::new([byte[]]($body + [Security.Cryptography.SHA256]::HashData($body)[0..1] + 1))
@@ -1396,15 +1399,18 @@ function Read-ModPack([string]$Code, $List) {
         $body = [byte[]]$all[0..($all.Length - 4)]
         $h = [Security.Cryptography.SHA256]::HashData($body)
         if ($h[0] -ne $all[-3] -or $h[1] -ne $all[-2]) { throw $bad }
-        if ($body[0] -ne 2) { throw 'This code was made by a newer cpmods: update cpmods first' }
+        $short = $body[0] -eq 3
+        if ($body[0] -ne 2 -and -not $short) { throw 'This code was made by a newer cpmods: update cpmods first' }
         $p = @{ i = 1 }
         $num = { $v = [long]0; $sh = 0; do { if ($p.i -ge $body.Length -or $sh -gt 35) { throw $bad }; $b = $body[$p.i]; $p.i++; $v = $v -bor ([long]($b -band 0x7F) -shl $sh); $sh += 7 } while ($b -band 0x80); $v }
         $str = { $len = & $num; if ($p.i + $len -gt $body.Length) { throw $bad }; $s = [Text.Encoding]::UTF8.GetString($body, $p.i, $len); $p.i += $len; $s }
         $pn = & $str; $pg = & $str
         $List = @{ format = 'cpmods-modlist'; name = $pn; game = $pg; mods = [Collections.Generic.List[object]]::new() }
-        $count = & $num; $mid = [long]0
+        $count = & $num; $id = [long]0
         for ($k = 0; $k -lt $count; $k++) {
-            $x = & $num; $mid += $x -shr 1; $fid = & $num
+            $x = & $num; $id += $x -shr 1
+            # a short code has no mod ids: 0 = ask Nexus
+            if ($short) { $mid = 0; $fid = $id } else { $mid = $id; $fid = & $num }
             $sub = if ($x -band 1) { & $str } else { $null }
             $List.mods.Add(@{ modId = $mid; fileId = $fid; sub = $sub })
         }
@@ -1413,7 +1419,7 @@ function Read-ModPack([string]$Code, $List) {
     $mods = [Collections.Generic.List[object]]::new(); $seen = @{}
     foreach ($m in @($List.mods)) {
         $mid = 0; $fid = 0
-        if ($m -isnot [Collections.IDictionary] -or -not [int]::TryParse("$($m.modId)", [ref]$mid) -or -not [int]::TryParse("$($m.fileId)", [ref]$fid) -or $mid -le 0 -or $fid -le 0 -or $seen[$fid]) { continue }
+        if ($m -isnot [Collections.IDictionary] -or -not [int]::TryParse("$($m.modId)", [ref]$mid) -or -not [int]::TryParse("$($m.fileId)", [ref]$fid) -or $mid -lt 0 -or $fid -le 0 -or $seen[$fid]) { continue }
         $seen[$fid] = $true
         $sub = "$($m.sub)"
         if ([IO.Path]::IsPathRooted($sub) -or $sub -match '(^|[\\/])\.\.([\\/]|$)') { $sub = '' }
@@ -1427,7 +1433,17 @@ function Read-ModPack([string]$Code, $List) {
 # Names, file names and versions of pack entries from Nexus (one request per 40 mods). Two files of one mod are
 # named "Mod - File", like a second download of a mod. Files Nexus no longer has come back in gone.
 function Resolve-PackMods($Mods) {
-    $ids = @($Mods | ForEach-Object { [int]$_.modId } | Sort-Object -Unique)
+    # entries without a mod id (short codes): Nexus finds each file's mod (uid = game id << 32 | file id, 50 per request)
+    $need = @($Mods | Where-Object { -not $_.modId })
+    for ($i = 0; $i -lt $need.Count; $i += 50) {
+        $chunk = $need[$i..([Math]::Min($i + 49, $need.Count - 1))]
+        $q = '{ modFilesByUid(uids: [' + (($chunk | ForEach-Object { "`"$(([long]3333 -shl 32) + [long]$_.fileId)`"" }) -join ', ') + '], count: 50) { nodes { fileId modId } } }'
+        $d = try { Invoke-NexusGql $q } catch { throw "Nexus did not answer, try again in a moment ($($_.Exception.Message))" }
+        $owner = @{}; foreach ($n in @($d.modFilesByUid.nodes)) { if ($n) { $owner[[long]$n.fileId] = [int]$n.modId } }
+        # a file Nexus does not know keeps 0 and is reported as gone
+        foreach ($e in $chunk) { $e.modId = [int]$owner[[long]$e.fileId] }
+    }
+    $ids = @($Mods | ForEach-Object { [int]$_.modId } | Where-Object { $_ -gt 0 } | Sort-Object -Unique)
     $names = @{}; $files = @{}
     for ($i = 0; $i -lt $ids.Count; $i += 40) {
         $chunk = $ids[$i..([Math]::Min($i + 39, $ids.Count - 1))]
@@ -1440,7 +1456,7 @@ function Resolve-PackMods($Mods) {
     $ok = [Collections.Generic.List[object]]::new(); $gone = [Collections.Generic.List[string]]::new()
     foreach ($e in $Mods) {
         $f = $files[[int]$e.fileId]; $mn = $names[[int]$e.modId]
-        if (-not $f -or -not $mn -or $f.category -eq 'REMOVED') { $gone.Add($(if ($mn) { "$mn (file $($e.fileId))" } else { "Nexus mod $($e.modId)" })); continue }
+        if (-not $f -or -not $mn -or $f.category -eq 'REMOVED') { $gone.Add($(if ($mn) { "$mn (file $($e.fileId))" } elseif ($e.modId) { "Nexus mod $($e.modId)" } else { "Nexus file $($e.fileId)" })); continue }
         $ok.Add([ordered]@{ name = $mn; modId = [int]$e.modId; fileId = [int]$e.fileId; version = "$($f.version)"; fileName = "$($f.name)"; sub = $e.sub })
     }
     foreach ($g in @($ok | Group-Object { $_.modId } | Where-Object Count -gt 1)) { foreach ($e in $g.Group) { $e.name = "$($e.name) - $($e.fileName)" } }
