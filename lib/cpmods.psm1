@@ -1472,29 +1472,32 @@ function Resolve-PackMods($Mods) {
 }
 
 # What getting a modpack changes here: new mods, mods you have (same file, on or off), mods you have in another
-# version (same name, or the same file of that Nexus mod; newer = the pack's file was uploaded later), frameworks you lack
+# version (the same file of that Nexus mod by file name; newer = the pack's file was uploaded later), frameworks you lack
 function Get-PackPlan($Pack) {
     $s = Get-State
     $local = @(@($s.mods | ForEach-Object { @{ m = $_; on = $true } }) + @($s.disabled | ForEach-Object { @{ m = $_; on = $false } }))
     $names = @($local | ForEach-Object { "$($_.m.name)" })
     $res = Resolve-PackMods $Pack.mods
-    $plan = [ordered]@{ name = $Pack.name; game = $Pack.game; total = @($Pack.mods).Count; new = @(); have = @(); turnOn = @(); versions = @(); frameworks = @(); gone = $res.gone }
+    $plan = [ordered]@{ name = $Pack.name; game = $Pack.game; total = @($Pack.mods).Count; new = @(); have = @(); turnOn = @(); versions = @(); gone = $res.gone
+        frameworks = @(Get-Frameworks | Where-Object { $names -notcontains $_.name } | ForEach-Object { "$($_.name)" })
+    }
     $used = @{}
     foreach ($e in $res.mods) {
         $hit = $local | Where-Object { [int]$_.m.fileId -eq $e.fileId } | Select-Object -First 1
         if ($hit) { $used[$hit.m.name] = $true; if ($hit.on) { $plan.have += $hit.m.name } else { $plan.turnOn += $hit.m.name }; continue }
-        $hit = $local | Where-Object { [int]$_.m.modId -eq $e.modId -and -not $used[$_.m.name] -and ($_.m.name -eq $e.name -or ($e.fileName -and $_.m.fileName -and (Get-NormName $_.m.fileName) -eq (Get-NormName $e.fileName))) } | Select-Object -First 1
+        # one mod's files share its name (main, optional...): with file names on both sides only they decide
+        $hit = $local | Where-Object { [int]$_.m.modId -eq $e.modId -and -not $used[$_.m.name] -and $(if ($e.fileName -and $_.m.fileName) { (Get-NormName $_.m.fileName) -eq (Get-NormName $e.fileName) } else { $_.m.name -eq $e.name }) } | Select-Object -First 1
         if ($hit) {
             $m = $hit.m; $used[$m.name] = $true
             # queued under your name, so the download replaces your version instead of landing beside it
             $plan.versions += [ordered]@{ name = $m.name; mine = "$($m.version)"; pack = $e.version; newer = [bool]($m.fileId -and $e.fileId -gt [int]$m.fileId); older = [bool]($m.fileId -and $e.fileId -lt [int]$m.fileId); on = $hit.on; back = [bool]($m.archive -and (Test-Path -LiteralPath $m.archive)); modId = $e.modId; fileId = $e.fileId; sub = $e.sub }
             continue
         }
-        # an unrelated mod here has the same name: a distinct name keeps the install from replacing it
+        # another mod here (or earlier in the pack) has the same name: a distinct name keeps the install from replacing it
         if ($names -contains $e.name) { $e.name = "$($e.name) ($($e.modId))" }
+        $names += $e.name
         $plan.new += $e
     }
-    $plan.frameworks = @(Get-Frameworks | Where-Object { $names -notcontains $_.name } | ForEach-Object { "$($_.name)" })
     $plan
 }
 

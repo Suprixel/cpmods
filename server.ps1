@@ -134,6 +134,7 @@ function Update-GameLean {
     if (($now - $lean.check).TotalSeconds -lt 3) { return }
     $lean.check = $now
     $ps = [Diagnostics.Process]::GetProcessesByName('Cyberpunk2077'); $run = $ps.Length -gt 0; foreach ($x in $ps) { $x.Dispose() }
+    $shared.gameRun = $run
     if ($run -eq $lean.run) { return }
     $lean.run = $run
     # game started (also from Steam): saves are copied when the mod setup changed; game closed: a launch without mods ends

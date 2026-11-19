@@ -628,20 +628,18 @@ function Get-ProblemNote([string]$Folder, [string]$Text) {
 function Get-MessageSig($P) { "$($P.source)|$($P.mod)|" + ("$($P.text)".ToLower() -replace '0x[0-9a-f]+|[0-9a-f]{16,}|\d+', '#') }
 
 # Sets .known on each problem: it also showed up in an earlier launch that closed normally, so it did not stop the
-# game and is not flagged again (new messages still are). Only clean launches teach; with no record yet, the
-# messages of a clean launch become the baseline. Record: state\known-messages.json, signature -> first clean launch.
+# game and is not flagged again; a new message is flagged once. Only clean launches teach.
+# Record: state\known-messages.json, signature -> start of the first clean launch that had it.
 # shortcut: the record only grows (one line per distinct message); prune it if it ever reaches thousands of entries
 function Set-KnownMessages($Probs, [datetime]$Start, [bool]$Clean) {
     $f = Join-Path (Get-CpPaths).state 'known-messages.json'
     $known = if (Test-Path -LiteralPath $f) { try { Read-JsonFile $f } catch { $null } } else { $null }
-    $base = $Clean -and $known -isnot [Collections.IDictionary]
     if ($known -isnot [Collections.IDictionary]) { $known = @{} }
-    # launch start as ticks (JSON turns ISO date strings back into dates); the baseline is 0, earlier than any launch,
-    # so it counts as known on every rebuild of this report too
+    # launch start as ticks (JSON would turn ISO date strings back into dates)
     $at = $Start.Ticks; $learned = $false
     foreach ($p in $Probs) {
         $sig = Get-MessageSig $p
-        if ($Clean -and -not $known.ContainsKey($sig)) { $known[$sig] = $(if ($base) { 0 } else { $at }); $learned = $true }
+        if ($Clean -and -not $known.ContainsKey($sig)) { $known[$sig] = $at; $learned = $true }
         $p.known = $known.ContainsKey($sig) -and [long]$known[$sig] -lt $at
     }
     if ($learned) { try { Write-JsonFile $f $known } catch { } }

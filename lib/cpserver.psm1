@@ -680,6 +680,12 @@ function Clear-CpWorkers($Shared, $Reqs) {
 function Test-CpShouldExit($Shared) {
     if (@($Shared.jobs.Clone().Values | Where-Object { $_.status -eq 'running' }).Count) { return $false }
     if ($Shared.stop) { return $true }
+    # a launch without mods is under way: stay to bring the mods back when the game closes (gameRun: server.ps1)
+    $vf = Join-Path (Get-CpPaths).state 'vanilla.json'
+    if ([IO.File]::Exists($vf)) {
+        $v = try { Read-JsonFile $vf } catch { $null }
+        if ($v -and ($Shared.gameRun -or (-not $v.gameSeen -and ((Get-Date) - [datetime]$v.started).TotalMinutes -lt 10))) { return $false }
+    }
     # the built-in window may be suspended (minimized) and silent: it ends the server when it closes
     if ($Shared.winOpen) { return $false }
     $now = [datetime]::UtcNow

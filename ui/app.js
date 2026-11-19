@@ -1035,6 +1035,7 @@
       <div class="page-body" id="lib-body"></div>`;
     renderLibBody();
     ensureCompat(false);
+    autoCheckUpdates();
   }
   function renderLibBody() {
     const body = $('#lib-body');
@@ -1071,7 +1072,7 @@
     const cr = allCrashIssues().length;
     const size = all.filter(m => m.on).reduce((s, m) => s + (+m.size || 0), 0);
     box.innerHTML = `<span class="st-item"><b>${n.mods}</b>&nbsp;mods and ${n.fw} frameworks &middot; ${fmtSize(size)} on disk</span>
-      <button class="st-item link${n.upd ? ' warn' : ''}" data-act="${L.updates ? 'lib-filter' : 'lib-updates'}" data-v="upd">${ic('refresh')}${L.updates ? (n.upd ? `${plural(n.upd, 'update')} available` : 'Everything up to date') : 'Updates not checked'}</button>
+      <button class="st-item link${n.upd ? ' warn' : ''}" data-act="${L.updates ? 'lib-filter' : 'lib-updates'}" data-v="upd">${L.checking && !L.updates ? '<span class="spin"></span>Checking for updates' : ic('refresh') + (L.updates ? (n.upd ? `${plural(n.upd, 'update')} available` : 'Everything up to date') : 'Updates not checked')}</button>
       ${cr ? `<button class="st-item link bad" data-act="go" data-page="compat" title="See them on the Compatibility page">${ic('alert')}${plural(cr, 'problem')} that can crash the game</button>` : ''}`;
   }
   function renderLibList() {
@@ -1082,7 +1083,7 @@
     if (L.view === 'map') return renderLibMap(box, items);
     if (!items.length) {
       const empty = !S.st.mods.length && !S.st.disabled.length;
-      box.innerHTML = `<div class="card"><div class="empty">${empty ? `<h3>No mods yet</h3>Find mods in Discover, or let cpmods take over mods you installed before.<br><button class="btn primary" data-act="go" data-page="discover">Browse mods</button> <button class="btn" data-act="tool" data-tool="discover">Find existing mods</button>` : L.filter === 'upd' && !L.updates ? `<h3>Updates not checked yet</h3><button class="btn primary" data-act="lib-updates">Check for updates</button>` : '<h3>Nothing here</h3>No mods match these filters.'}</div></div>`;
+      box.innerHTML = `<div class="card"><div class="empty">${empty ? `<h3>No mods yet</h3>Find mods in Discover, or let cpmods take over mods you installed before.<br><button class="btn primary" data-act="go" data-page="discover">Browse mods</button> <button class="btn" data-act="tool" data-tool="discover">Find existing mods</button>` : L.filter === 'upd' && !L.updates ? (L.checking ? '<h3><span class="spin"></span> Checking for updates</h3>This runs in the background; keep using the app.' : `<h3>Updates not checked yet</h3><button class="btn primary" data-act="lib-updates">Check for updates</button>`) : '<h3>Nothing here</h3>No mods match these filters.'}</div></div>`;
       return;
     }
     // Updates view: tick the ones to update, then one button for all of them
@@ -1161,9 +1162,12 @@
       <p class="dim small map-foot">Each row is a folder that the game or a framework reads when it starts. Open one to see which mods put files there; click a mod for its exact files.${offN ? ` ${plural(offN, 'disabled mod')} not shown.` : ''}</p>`;
   }
 
-  async function checkUpdates() {
+  // quiet: the background check the Library starts by itself (no toast, the view and filter stay as they are)
+  async function checkUpdates(quiet) {
+    if (S.lib.checking) return;
     S.lib.checking = true;
-    if (S.page === 'library' && !typing()) pageLibrary($('#page'));
+    if (quiet) { if (S.page === 'library') { renderLibSum(); libUpdBtn(); } }
+    else if (S.page === 'library' && !typing()) pageLibrary($('#page'));
     else if (S.page === 'reports') renderReportsBody();
     try {
       const nexus = stMods().filter(m => /^nexus:/.test(m.source || '') && m.modId);
@@ -1184,13 +1188,30 @@
       }
       S.lib.updates = ups; S.lib.updSel = {};
       try { S.lib.fw = (await api('/api/fwupdates')).items || []; } catch (e) { S.lib.fw = []; }
+      S.lib.updatesAt = Date.now();
       const n = Object.keys(ups).length + S.lib.fw.filter(x => x.update).length;
-      toast(n ? `${plural(n, 'update')} available` : 'Everything is up to date', n ? 'Update them all with one button, or untick the ones to skip.' : '', n ? 'warn' : 'ok', 5000);
-      if (n) S.lib.filter = 'upd';
-    } catch (e) { toast('Update check failed', e.message, 'bad'); }
+      if (!quiet) {
+        toast(n ? `${plural(n, 'update')} available` : 'Everything is up to date', n ? 'Update them all with one button, or untick the ones to skip.' : '', n ? 'warn' : 'ok', 5000);
+        if (n) S.lib.filter = 'upd';
+      }
+    } catch (e) { if (!quiet) toast('Update check failed', e.message, 'bad'); }
     S.lib.checking = false;
-    if (S.page === 'library') pageLibrary($('#page'));
+    if (quiet) { if (S.page === 'library') { libUpdBtn(); if (!typing()) renderLibBody(); else { renderLibSum(); renderLibList(); } } }
+    else if (S.page === 'library') pageLibrary($('#page'));
     else if (S.page === 'reports') renderReportsBody();
+  }
+  // the Library checks by itself in the background: at most every 30 minutes, never while the game runs
+  function autoCheckUpdates() {
+    const g = S.st && S.st.game;
+    if (S.lib.checking || (g && g.running) || Date.now() - (S.lib.updatesAt || 0) < 30 * 60e3) return;
+    checkUpdates(true);
+  }
+  // the header is not redrawn by a background check: its button follows the check
+  function libUpdBtn() {
+    const b = $('#page [data-act="lib-updates"]');
+    if (!b) return;
+    b.disabled = !!S.lib.checking;
+    setHtml(b, S.lib.checking ? '<span class="spin"></span>Checking' : ic('refresh') + 'Check for updates');
   }
 
   // the ticked updates: a restore point, then frameworks from GitHub and Nexus files through the queue,
@@ -1492,7 +1513,7 @@
   function launchSettingsHtml(s, so) {
     return `<div class="setting"><div class="setting-text"><b>Launch the game</b><span>Through Steam is recommended. Directly starts Cyberpunk2077.exe (Steam still opens in the background).</span></div><select data-setsel="launchMode" aria-label="Launch mode">${opt([['steam', 'Through Steam'], ['direct', 'Directly']], s.launchMode || 'steam')}</select></div>
       <div class="setting"><div class="setting-text"><b>Report when the game closes</b><span>Show a short summary of the launch with a link to the details.</span></div><label class="switch"><input type="checkbox" data-setting="reportOnExit"${s.reportOnExit !== false ? ' checked' : ''}><span></span></label></div>
-      <div class="setting"><div class="setting-text"><b>Warn before launching</b><span>Ask first when the compatibility check found a high-risk problem.</span></div><label class="switch"><input type="checkbox" data-setting="warnRisk"${s.warnRisk !== false ? ' checked' : ''}><span></span></label></div>
+      <div class="setting"><div class="setting-text"><b>Warn before launching</b><span>Ask first when the compatibility check found a problem that can crash the game.</span></div><label class="switch"><input type="checkbox" data-setting="warnRisk"${s.warnRisk !== false ? ' checked' : ''}><span></span></label></div>
       ${so ? `<div class="setting"><div class="setting-text"><b>Steam launch options</b><span>${so.found && so.value ? `<code>${h(so.value)}</code> is set in Steam (game Properties, General). cpmods only reads it.` : 'None set in Steam. Adding --launcher-skip there skips the CD Projekt launcher.'}</span></div></div>` : ''}`;
   }
   function bisectCard() {
@@ -2116,7 +2137,8 @@
         <div><h1>Compatibility</h1><p class="sub">Missing requirements, mods that install the same files or change the same game assets, script functions replaced twice, shared database tweaks and script mods not updated for the current patch. Each finding gets a risk level with the reasons behind it.</p></div>
         <div class="ph-actions"><button class="btn" data-act="compat-run"${L.compatLoading ? ' disabled' : ''}>${L.compatLoading ? '<span class="spin"></span>Checking' : ic('refresh') + 'Run again'}</button></div></div></header>
       <div class="page-body">${!d ? '<div class="callout neutral"><span class="spin"></span><div>Checking your mods. This can take a few seconds.</div></div>' : d.error ? `<div class="err">${h(d.error)}</div>` : compatHtml(d)}</div>`;
-    ensureCompat(false);
+    // only the first visit starts a check: a failed one waits for "Run again" (drawing this page must not retry it)
+    if (!d) ensureCompat(false);
   }
   function compatHtml(d) {
       const all = d.issues || [], live = all.filter(i => !i.ignored), ign = all.filter(i => i.ignored);
@@ -2124,7 +2146,8 @@
       const head = !live.length ? callout('ok', `<b>No problems found</b> across ${d.mods} mods and ${fmtNum(d.assets)} game assets.`)
         : callout(hi.length ? 'bad' : me.length ? 'warn' : 'ok', `<b>${hi.length} high, ${me.length} medium and ${lo.length} low risk${ok.length ? `, plus ${ok.length} intended overlap${ok.length === 1 ? '' : 's'}` : ''}.</b> High risk usually means something will not work. Low risk and intended overlaps can be left alone.`);
       const legend = `<div class="legend" style="margin:10px 0 4px">${['high', 'medium', 'low', 'ok'].map(r => `<span>${riskPill(r)} ${h({ high: 'likely breaks something', medium: 'worth a look', low: 'usually fine', ok: 'on purpose, leave it' }[r])}</span>`).join('')}</div>`;
-      const group = (title, list, open) => list.length ? `<details class="risk-group"${open ? ' open' : ''}><summary>${h(title)} <span class="n">${list.length}</span></summary>${list.map(issueCard).join('')}</details>` : '';
+      // a group you opened or closed stays that way when the page is drawn again (S.compatOpen, kept by the toggle listener)
+      const group = (title, list, open) => list.length ? `<details class="risk-group" data-grp="${h(title)}"${(S.compatOpen && title in S.compatOpen ? S.compatOpen[title] : open) ? ' open' : ''}><summary>${h(title)} <span class="n">${list.length}</span></summary>${list.map(issueCard).join('')}</details>` : '';
       const rules = arr(d.loadOrder);
       const loCard = rules.length ? `<div class="card lo-card"><div class="card-head"><h3>${ic('list')} Winners you chose</h3><span class="dim small">These archives load first and win; cpmods keeps it that way after updates</span></div><div class="list">${rules.map(r => `<div class="li slim"><div class="li-main"><div class="li-title"><span class="t">${h(r.mod)}</span></div><div class="li-sub"><span class="mono-path">${h(r.name)}</span><span>wins over ${h(arr(r.over).join(', '))}</span></div></div><button class="btn sm ghost" data-act="lo-undo" data-archive="${h(r.name)}">${ic('undo')}Undo</button></div>`).join('')}</div></div>` : '';
       return loCard + head + legend + group('High risk', hi, true) + group('Medium risk', me, true) + group('Low risk', lo, hi.length + me.length < 4) + group('Intended overlaps and your choices', ok, false) + group('Marked as fine', ign, false)
@@ -3094,6 +3117,8 @@
     if (t.dataset.toast) { const x = t.closest('.toast'); if (x) x.remove(); }
     fn(t, ev);
   });
+  // toggle does not bubble: caught on the way down
+  document.addEventListener('toggle', ev => { const d = ev.target; if (d && d.dataset && d.dataset.grp) (S.compatOpen || (S.compatOpen = {}))[d.dataset.grp] = d.open; }, true);
   document.addEventListener('input', ev => {
     const t = ev.target;
     const pk = (t.id || '').match(/^(cw|bw)-(l|hex)$/);
@@ -3278,7 +3303,8 @@
       if (S.lib.compatStale && (S.page === 'library' || S.page === 'compat')) debounce('compat', () => ensureCompat(true), 1500);
       if (S.page === 'discover') renderResults(true);
       else if (S.page === 'collections') renderColResults();
-      else if (!typing()) { if (S.page === 'library') renderLibBody(); else if (S.page === 'downloads') { pageDownloads($('#page')); } else renderPage(); }
+      // the Compatibility page has its own data (redrawn when its check reruns), not this state
+      else if (!typing()) { if (S.page === 'library') renderLibBody(); else if (S.page === 'downloads') { pageDownloads($('#page')); } else if (S.page !== 'compat') renderPage(); }
       if (S.pane && ['mod', 'col', 'files', 'bisect', 'crash', 'preview'].includes(S.pane.kind) && (S.pane.data || ['files', 'bisect', 'crash'].includes(S.pane.kind)) && !(typing() && $('#pane').contains(document.activeElement))) renderPane();
     } else if (S.page === 'downloads') { const j = $('#jobs'); if (j) j.innerHTML = jobsHtml(); }
   }

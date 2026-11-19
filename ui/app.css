@@ -875,7 +875,9 @@ input.hex-in { width: 100px; font: 13px "Cascadia Mono", Consolas, monospace; }
 .gm-last { display: inline-flex; align-items: center; gap: 8px; max-width: 100%; padding: 4px 8px; border: 0; border-radius: 7px; background: none; color: var(--text2); font-size: 12.5px; cursor: pointer; }
 .gm-last:hover { background: var(--hover); color: var(--text); }
 .gm-last svg { width: 15px; height: 15px; }
-.gm-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(380px, 1fr)); gap: 16px; align-items: start; }
+.gm-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(380px, 1fr)); gap: 16px; align-items: stretch; }
+/* .gm and .gm-grid space their boxes with gap; the card-after-card margin would push the second column down */
+.gm .card + .card { margin-top: 0; }
 .gm .card-head h3 svg { width: 17px; height: 17px; color: var(--text3); }
 
 /* settings: pointer to the Game page, disk space */

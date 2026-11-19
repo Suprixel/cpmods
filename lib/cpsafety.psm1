@@ -490,7 +490,8 @@ function Import-ModSettings([string]$Base64) {
 
 #region launch without mods: mod folders and loader files move into <game>\_cpmods_vanilla (same drive: instant) and come back after
 $script:VanillaDirs = 'archive\pc\mod', 'r6\scripts', 'r6\tweaks', 'r6\input', 'red4ext', 'bin\x64\plugins', 'mods'
-$script:VanillaFiles = 'bin\x64\version.dll', 'bin\x64\winmm.dll', 'bin\x64\global.ini', 'engine\config\base\scripts.ini'
+# loaders and DLL injectors (ReShade, ASI loaders): the game ships none of these in bin\x64; moved only when present
+$script:VanillaFiles = 'bin\x64\version.dll', 'bin\x64\winmm.dll', 'bin\x64\global.ini', 'engine\config\base\scripts.ini', 'bin\x64\dxgi.dll', 'bin\x64\d3d11.dll', 'bin\x64\d3d12.dll', 'bin\x64\dinput8.dll'
 # an antivirus scan of fresh files blocks a move for a moment: try again for a few seconds
 function Move-Retry([string]$From, [string]$To, [bool]$Dir, [bool]$Overwrite = $false) {
     for ($i = 0; ; $i++) {
@@ -708,7 +709,8 @@ function Get-DirUse([string]$Path) {
 # to start), and with -Old also the older versions kept for going back (restore points, the two previous downloads of a mod)
 function Get-SpareDownloads([switch]$Old) {
     $pts = [Collections.Generic.HashSet[string]]::new([StringComparer]::OrdinalIgnoreCase)
-    foreach ($p in Get-RestorePoints) { foreach ($m in @($p.mods)) { if ($m.archive) { [void]$pts.Add([IO.Path]::GetFileName("$($m.archive)")) } } }
+    # restore points and profiles both reinstall mods from these downloads
+    foreach ($p in @(Get-RestorePoints) + @(Get-Profiles)) { foreach ($m in @($p.mods)) { if ($m.archive) { [void]$pts.Add([IO.Path]::GetFileName("$($m.archive)")) } } }
     $s = Get-State
     foreach ($m in @($s.mods) + @($s.disabled)) { foreach ($o in @($m.older)) { if ($o) { [void]$pts.Add([IO.Path]::GetFileName("$o")) } } }
     $cut = (Get-Date).AddMinutes(-30)

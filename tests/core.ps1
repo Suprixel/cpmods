@@ -151,18 +151,18 @@ try {
 
     Write-Host '--- T12: launch without mods (park and bring back)'
     New-Item -ItemType Directory -Force "$g\red4ext\plugins\X", "$g\bin\x64\plugins" | Out-Null
-    'dll' | Set-Content "$g\red4ext\plugins\X\x.dll"; 'asi' | Set-Content "$g\bin\x64\plugins\cet.asi"
+    'dll' | Set-Content "$g\red4ext\plugins\X\x.dll"; 'asi' | Set-Content "$g\bin\x64\plugins\cet.asi"; 'reshade' | Set-Content "$g\bin\x64\dxgi.dll"
     Install-ModArchive $zB (& $meta 'ModB') -OnConflict overwrite | Out-Null   # base file replaced by B (vanilla backup with B)
     Check ((& $cont $cfgRel) -eq 'B') 'T12 setup B on base file'
     New-Item -ItemType Directory -Force $env:CPMODS_CONFIG | Out-Null; 'MINE' | Set-Content "$env:CPMODS_CONFIG\UserSettings.json"
     [void](Start-VanillaSession)
     'RESET BY THE GAME' | Set-Content "$env:CPMODS_CONFIG\UserSettings.json"
-    Check (-not (Test-Path "$g\archive\pc\mod") -and -not (Test-Path "$g\red4ext") -and -not (Test-Path "$g\bin\x64\plugins") -and -not (Test-Path "$g\bin\x64\version.dll") -and -not (Test-Path "$g\engine\config\base\scripts.ini")) 'T12 mod folders and loaders set aside'
+    Check (-not (Test-Path "$g\archive\pc\mod") -and -not (Test-Path "$g\red4ext") -and -not (Test-Path "$g\bin\x64\plugins") -and -not (Test-Path "$g\bin\x64\version.dll") -and -not (Test-Path "$g\engine\config\base\scripts.ini") -and -not (Test-Path "$g\bin\x64\dxgi.dll")) 'T12 mod folders, loaders and DLL injectors (ReShade) set aside'
     Check ((& $cont $cfgRel) -eq 'VANILLA') 'T12 original base file in place'
     $threw = $false; try { Install-ModArchive $zE (& $meta 'ModE') | Out-Null } catch { $threw = $_.Exception.Message -like '*set aside*' }
     Check $threw 'T12 installs blocked while mods are set aside'
     [void](Restore-VanillaSession)
-    Check ((Test-Path "$g\archive\pc\mod\bbb.archive") -and (Test-Path "$g\red4ext\plugins\X\x.dll") -and (Test-Path "$g\bin\x64\plugins\cet.asi") -and (Test-Path "$g\bin\x64\version.dll") -and (Test-Path "$g\engine\config\base\scripts.ini")) 'T12 everything back'
+    Check ((Test-Path "$g\archive\pc\mod\bbb.archive") -and (Test-Path "$g\red4ext\plugins\X\x.dll") -and (Test-Path "$g\bin\x64\plugins\cet.asi") -and (Test-Path "$g\bin\x64\version.dll") -and (Test-Path "$g\engine\config\base\scripts.ini") -and (Test-Path "$g\bin\x64\dxgi.dll")) 'T12 everything back'
     Check ((& $cont $cfgRel) -eq 'B') 'T12 mod copy of the base file back'
     Check (-not (Test-Path "$g\_cpmods_vanilla") -and -not (Get-VanillaState)) 'T12 park folder and journal gone'
     Check ((Get-Content "$env:CPMODS_CONFIG\UserSettings.json" -Raw).Trim() -eq 'MINE' -and -not (Test-Path "$Sb\state\vanilla-usersettings.json")) 'T12 the game settings from before the launch are back'
@@ -367,6 +367,9 @@ try {
         9006 = 'ModD', @(@{ fileId = 60; name = 'Other ModD'; version = '1.0'; category = 'MAIN' })
         9007 = 'Was removed', @(@{ fileId = 70; name = 'x'; version = '1'; category = 'REMOVED' })
         9008 = 'Twin', @(@{ fileId = 80; name = 'Twin A'; version = '1'; category = 'MAIN' }, @{ fileId = 81; name = 'Twin B'; version = '1'; category = 'OPTIONAL' })
+        9010 = 'Lut', @(@{ fileId = 100; name = 'Lut main'; version = '1.0'; category = 'MAIN' }, @{ fileId = 101; name = 'Lut Neutral'; version = '1.0'; category = 'OPTIONAL' })
+        9011 = 'Same Name', @(@{ fileId = 110; name = 'Main'; version = '1'; category = 'MAIN' })
+        9012 = 'Same Name', @(@{ fileId = 120; name = 'Main'; version = '1'; category = 'MAIN' })
     }
     $origGql = & (Get-Module cpmods) { ${function:Invoke-NexusGql} }
     & (Get-Module cpmods) {
@@ -405,6 +408,10 @@ try {
         Check (@(Get-SettingsBackups | Where-Object { $_.reason -eq 'Before the modpack Friends' }).Count -eq 1) 'T28 mod settings backup made first'
         Check ((@($q | ForEach-Object { "$($_.fileId)=$($_.name)" }) -join ',') -eq '50=Brand new,60=ModD (9006),80=Twin - Twin A,81=Twin - Twin B,21=PackOld') "T28 queue: new mods, then PackOld updated under its name; PackKeep not downgraded: $(($q | ForEach-Object { "$($_.fileId)=$($_.name)" }) -join ', ')"
         Check (($st.mods | Where-Object name -eq 'PackOff') -and ($st.mods | Where-Object name -eq 'PackKeep').fileId -eq 30) 'T28 PackOff turned back on, PackKeep unchanged'
+        # an optional file of a mod you have is not "another version" of your main file; two mods named alike stay apart
+        & $nx 'Lut' 9010 100 '1.0' (New-TestMod 'Lut' @{ 'archive\pc\mod\lut.archive' = 'l' })
+        $ep = Get-PackPlan (Read-ModPack (ConvertTo-PackCode 'Edge' @(@{ modId = 9010; fileId = 101 }, @{ modId = 9011; fileId = 110 }, @{ modId = 9012; fileId = 120 })).code)
+        Check (-not @($ep.versions).Count -and (@($ep.new | ForEach-Object name) -join ',') -eq 'Lut (9010),Same Name,Same Name (9012)') "T28 optional file is new beside your main file; same-named mods get distinct names: $(($ep.new | ForEach-Object name) -join ', ')"
     }
     finally { & (Get-Module cpmods) { param($f) Set-Item function:script:Invoke-NexusGql $f } $origGql }
     & $nx 'PackOld' 9002 21 '2.0' (New-TestMod 'PackOld2' @{ 'archive\pc\mod\pold.archive' = 'o2' })
@@ -442,7 +449,7 @@ try {
     $t0 = (Get-Date).AddDays(-3); $t1 = $t0.AddDays(1); $t2 = $t1.AddDays(1)
     $a = @(& $mk 'init.lua:87: nil value at 0x1234')
     Set-KnownMessages $a $t0 $true
-    Check ($a[0].known) 'T30 first clean launch with no record: its messages become the baseline'
+    Check (-not $a[0].known -and (Test-Path "$Sb\state\known-messages.json")) 'T30 first clean launch, no record yet: its messages are flagged once and remembered'
     $b = @((& $mk 'init.lua:90: nil value at 0x9F9F'), (& $mk 'brand new error'))
     Set-KnownMessages $b $t1 $true
     Check ($b[0].known -and -not $b[1].known) 'T30 the same message with other numbers is known; a new one is flagged'
@@ -453,6 +460,27 @@ try {
     Check ($c[0].known -and -not $c[1].known) 'T30 the next launch knows it; a crash launch teaches nothing'
     Set-KnownMessages @($c[1]) $t2.AddHours(1) $true
     Check (-not $c[1].known -and (Get-Content "$Sb\state\known-messages.json" -Raw) -match 'only after a crash') 'T30 a clean launch learns it (flagged this once)'
+
+    Write-Host '--- T31: the server stays while a launch without mods runs; cleanup keeps what profiles need'
+    $sh = [hashtable]::Synchronized(@{ jobs = [hashtable]::Synchronized(@{}); stop = $false; winOpen = $false; byeAt = [datetime]::UtcNow.AddMinutes(-1); lastSeen = [datetime]::UtcNow.AddMinutes(-2); gameRun = $false })
+    Check (Test-CpShouldExit $sh) 'T31 window closed, nothing running: the server leaves'
+    try {
+        Write-JsonFile (Get-VanillaFile) ([ordered]@{ started = (Get-Date).AddMinutes(-30).ToString('s'); gameSeen = $true; moves = @() })
+        $sh.gameRun = $true
+        Check (-not (Test-CpShouldExit $sh)) 'T31 mods set aside and the game running: it stays to bring them back'
+        $sh.gameRun = $false
+        Check (Test-CpShouldExit $sh) 'T31 the game closed (the restore job keeps it running meanwhile): it may leave'
+        Write-JsonFile (Get-VanillaFile) ([ordered]@{ started = (Get-Date).AddMinutes(-2).ToString('s'); gameSeen = $false; moves = @() })
+        Check (-not (Test-CpShouldExit $sh)) 'T31 the game is still starting: it stays'
+    }
+    finally { Remove-Item (Get-VanillaFile) -Force -ErrorAction SilentlyContinue }
+    $zPr = New-TestMod 'ProfMod' @{ 'archive\pc\mod\prof.archive' = 'p' }
+    Copy-Item $zPr "$dl\prof.zip"
+    Install-ModArchive "$dl\prof.zip" (& $meta 'ProfMod') | Out-Null
+    [void](Save-Profile 'WithProf')
+    Remove-InstalledMod 'ProfMod'
+    (Get-Item "$dl\prof.zip").LastWriteTime = (Get-Date).AddHours(-2)
+    Check (-not (@(Get-SpareDownloads) | Where-Object file -eq 'prof.zip') -and (@(Get-SpareDownloads -Old) | Where-Object file -eq 'prof.zip')) 'T31 a removed mod a profile still has: kept by the cleanup (only "older versions too" may delete it)'
 }
 catch { $script:fails++; Write-Host "FAIL (stopped): $($_.Exception.Message)" -ForegroundColor Red }
 finally {
