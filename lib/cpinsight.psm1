@@ -119,34 +119,7 @@ function Get-SteamLaunchOptions {
 }
 #endregion
 
-#region archive contents and install preview
-# Files inside a downloaded archive (paths with \, sizes); folders dropped
-function Get-ArchiveFileList([string]$Archive) {
-    $out = [Collections.Generic.List[object]]::new()
-    $z = Get-7z
-    if ($z) {
-        $lines = & $z l -slt -- $Archive 2>&1
-        if ($LASTEXITCODE -ne 0) { throw "Cannot read archive: $([IO.Path]::GetFileName($Archive))" }
-        $body = $false; $cur = $null
-        foreach ($ln in $lines) {
-            $t = "$ln"
-            if (-not $body) { if ($t -match '^-{5,}\s*$') { $body = $true }; continue }
-            if ($t -match '^Path = (.+)$') { if ($cur) { $out.Add($cur) }; $cur = @{ path = $Matches[1]; size = [long]0; dir = $false } }
-            elseif ($cur -and $t -match '^Size = (\d+)') { $cur.size = [long]$Matches[1] }
-            elseif ($cur -and ($t -match '^Folder = \+' -or $t -match '^Attributes = D')) { $cur.dir = $true }
-        }
-        if ($cur) { $out.Add($cur) }
-    }
-    elseif ([IO.Path]::GetExtension($Archive) -ieq '.zip') {
-        Add-Type -AssemblyName System.IO.Compression.FileSystem
-        $zf = [IO.Compression.ZipFile]::OpenRead($Archive)
-        try { foreach ($e in $zf.Entries) { $out.Add(@{ path = $e.FullName.TrimEnd('/'); size = [long]$e.Length; dir = $e.FullName.EndsWith('/') }) } }
-        finally { $zf.Dispose() }
-    }
-    else { throw '7-Zip is required to read this archive' }
-    @($out | Where-Object { -not $_.dir -and $_.path } | ForEach-Object { [pscustomobject]@{ path = ($_.path -replace '/', '\'); size = $_.size } })
-}
-
+#region install preview (archive contents: Get-ArchiveFileList in cpmods.psm1)
 # Where each file of an archive would be installed (same rule as the install: Get-LayoutPlan), without extracting
 function Get-ArchivePlan([string]$Archive, [string]$Sub, [string]$ModName) {
     $all = @(Get-ArchiveFileList $Archive)

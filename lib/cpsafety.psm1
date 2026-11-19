@@ -330,7 +330,8 @@ function Get-SettingsBackupDir { Get-SafetyDir 'settings' }
 function Test-SettingsPath([string]$Rel) {
     $r = "$Rel" -replace '/', '\'
     if (-not $r -or [IO.Path]::IsPathRooted($r) -or $r -match '(^|\\)\.\.(\\|$)' -or $r -match '[<>:"|?*]') { return $false }
-    # settings file types only: a .dll or .asi in a "settings" zip would run with the game
+    # settings file types only: a .dll or .asi in a "settings" zip would run with the game (.lua and .reds can be
+    # settings too; Import-ModSettings leaves out the code ones from other people's zips)
     $ext = [IO.Path]::GetExtension($r).ToLower()
     if ($script:UntrackedExt -notcontains $ext -and $script:EditedExt -notcontains $ext) { return $false }
     foreach ($root in $script:SettingsRoots) { if ($r.StartsWith("$root\", [StringComparison]::OrdinalIgnoreCase)) { return $true } }
@@ -472,6 +473,10 @@ function Import-ModSettings([string]$Base64) {
         $man = Read-SettingsManifest $tmp
         $bad = @(@($man.files) | Where-Object { -not (Test-SettingsPath $_.path) })
         if ($bad) { throw "It holds files outside mod folders ($($bad[0].path))" }
+        # someone else's file: a CET mod's init.lua or a .reds script is the mod's code, not a setting; left out
+        $all = @($man.files)
+        $man.files = @($all | Where-Object { "$($_.path)" -notmatch '(?i)(^|[\\/])init\.lua$|\.reds$' })
+        $code = $all.Count - @($man.files).Count
         $man.kind = 'imported'; $man.reason = 'Imported file'
         $z = [IO.Compression.ZipFile]::Open($tmp, 'Update')
         try {
@@ -483,8 +488,8 @@ function Import-ModSettings([string]$Base64) {
         Move-Item -LiteralPath $tmp -Destination (Join-Path $dir "$id.zip")
     }
     finally { Remove-Item -LiteralPath $tmp -Force -ErrorAction SilentlyContinue }
-    Write-Note "Imported a mod settings backup ($(@($man.files).Count) files)"
-    [ordered]@{ id = $id; count = @($man.files).Count }
+    Write-Note "Imported a mod settings backup ($(@($man.files).Count) files$(if ($code) { ", $code code files left out" }))"
+    [ordered]@{ id = $id; count = @($man.files).Count; code = $code }
 }
 #endregion
 

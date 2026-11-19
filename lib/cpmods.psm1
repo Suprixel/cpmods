@@ -95,18 +95,32 @@ function Expand-ModArchive([string]$Archive, [string]$Dest) {
     throw "This mod is a $([IO.Path]::GetExtension($Archive)) archive and needs 7-Zip: winget install 7zip.7zip"
 }
 
-function Get-ArchiveEntries([string]$Archive) {
+# The files inside an archive (path with "\", size), folders left out; 7-Zip when available, plain .zip without it
+function Get-ArchiveFileList([string]$Archive) {
+    $out = [Collections.Generic.List[object]]::new()
     $z = Get-7z
     if ($z) {
         $lines = & $z l -slt -- $Archive 2>&1
-        if ($LASTEXITCODE -ne 0) { throw "Cannot read archive: $Archive" }
-        return @($lines | ForEach-Object { if ("$_" -match '^Path = (.+)$') { $Matches[1] } } | Select-Object -Skip 1)
+        if ($LASTEXITCODE -ne 0) { throw "Cannot read archive: $([IO.Path]::GetFileName($Archive))" }
+        # the block before the ----- line describes the archive itself
+        $body = $false; $cur = $null
+        foreach ($ln in $lines) {
+            $t = "$ln"
+            if (-not $body) { if ($t -match '^-{5,}\s*$') { $body = $true }; continue }
+            if ($t -match '^Path = (.+)$') { if ($cur) { $out.Add($cur) }; $cur = @{ path = $Matches[1]; size = [long]0; dir = $false } }
+            elseif ($cur -and $t -match '^Size = (\d+)') { $cur.size = [long]$Matches[1] }
+            elseif ($cur -and ($t -match '^Folder = \+' -or $t -match '^Attributes = D')) { $cur.dir = $true }
+        }
+        if ($cur) { $out.Add($cur) }
     }
-    if ([IO.Path]::GetExtension($Archive) -ieq '.zip') {
+    elseif ([IO.Path]::GetExtension($Archive) -ieq '.zip') {
+        Add-Type -AssemblyName System.IO.Compression.FileSystem
         $zf = [IO.Compression.ZipFile]::OpenRead($Archive)
-        try { return @($zf.Entries | ForEach-Object { $_.FullName.TrimEnd('/') -replace '/', '\' }) } finally { $zf.Dispose() }
+        try { foreach ($e in $zf.Entries) { $out.Add(@{ path = $e.FullName.TrimEnd('/'); size = [long]$e.Length; dir = $e.FullName.EndsWith('/') }) } }
+        finally { $zf.Dispose() }
     }
-    throw '7-Zip is required to read this archive'
+    else { throw '7-Zip is required to read this archive' }
+    @($out | Where-Object { -not $_.dir -and $_.path } | ForEach-Object { [pscustomobject]@{ path = ($_.path -replace '/', '\'); size = $_.size } })
 }
 #endregion
 
@@ -722,7 +736,8 @@ function Get-DeferredMeta([string]$Archive) {
 
 function Resolve-DownloadFile([string]$Leaf) {
     $n = [IO.Path]::GetFileName("$Leaf")
-    if (-not $n -or $n -ne "$Leaf") { throw 'Invalid file name' }
+    # "." and ".." pass GetFileName unchanged but mean the downloads folder and the app folder
+    if (-not $n -or $n -ne "$Leaf" -or $n -match '^\.+$') { throw 'Invalid file name' }
     $p = Join-Path $script:DlDir $n
     if (-not (Test-Path -LiteralPath $p)) { throw "Not found in downloads: $n" }
     $p
@@ -749,7 +764,7 @@ function Get-DownloadsInfo($S) {
 
 # Lists folders inside an archive that look like a game root (for variant / FOMOD choice)
 function Get-ArchiveCandidates([string]$Archive) {
-    $paths = Get-ArchiveEntries $Archive
+    $paths = @(Get-ArchiveFileList $Archive | ForEach-Object { $_.path })
     $c = [Collections.Generic.HashSet[string]]::new([StringComparer]::OrdinalIgnoreCase)
     $top = [Collections.Generic.HashSet[string]]::new([StringComparer]::OrdinalIgnoreCase)
     foreach ($p in $paths) {

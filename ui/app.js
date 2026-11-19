@@ -2846,7 +2846,7 @@
     let bin = '';
     for (let i = 0; i < buf.length; i += 32768) bin += String.fromCharCode.apply(null, buf.subarray(i, i + 32768));
     const r = await bkOp({ op: 'settings-import', data: btoa(bin) });
-    if (r) toast('Settings file imported', `${plural(r.count, 'file')}. Use Restore on it to apply them.`, 'ok', 7000);
+    if (r) toast('Settings file imported', `${plural(r.count, 'file')}.${r.code ? ` ${plural(r.code, 'mod code file')} (init.lua, .reds) left out: those are not settings.` : ''} Use Restore on it to apply them.`, 'ok', 9000);
   }
 
   // ---------- key bindings ----------

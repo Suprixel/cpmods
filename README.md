@@ -48,6 +48,14 @@ pwsh -NoProfile -File tests\core.ps1
 pwsh -NoProfile -File tests\merge-json.ps1
 ```
 
+`tests\core.ps1` also starts a throwaway server and checks that it refuses requests without its token, from another host name or from another web page.
+
+The UI tests (`tests\ui`) copy the app into `%TEMP%\cpmods-uisb` with a fake game folder, open a hidden app window (Microsoft Edge WebView2) and drive it. They never start the game or open Nexus pages:
+
+```
+Get-ChildItem tests\ui\*.ps1 -Exclude cdp.ps1, sandbox.ps1 | ForEach-Object { pwsh -NoProfile -File $_.FullName }
+```
+
 ## Notes
 
 cpmods is a fan project, not affiliated with CD PROJEKT RED or Nexus Mods. Mods change game files: keep the restore points and save copies turned on.

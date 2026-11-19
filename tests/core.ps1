@@ -481,6 +481,56 @@ try {
     Remove-InstalledMod 'ProfMod'
     (Get-Item "$dl\prof.zip").LastWriteTime = (Get-Date).AddHours(-2)
     Check (-not (@(Get-SpareDownloads) | Where-Object file -eq 'prof.zip') -and (@(Get-SpareDownloads -Old) | Where-Object file -eq 'prof.zip')) 'T31 a removed mod a profile still has: kept by the cleanup (only "older versions too" may delete it)'
+
+    Write-Host '--- T32: download names, archive listing, code left out of settings imports'
+    foreach ($bad in '.', '..', '..\x.zip', 'C:\x.zip') { $err = try { [void](Resolve-DownloadFile $bad); '' } catch { $_.Exception.Message }; Check ($err -eq 'Invalid file name') "T32 download name refused: $bad" }
+    $zv = New-TestMod 'Variants' @{ 'Option A\archive\pc\mod\a.archive' = 'a'; 'Option B\archive\pc\mod\b.archive' = 'b'; 'readme.txt' = 'r' }
+    $cv = Get-ArchiveCandidates $zv
+    Check ((@($cv.candidates) -join ',') -eq 'Option A,Option B' -and $cv.count -eq 3 -and -not $cv.fomod -and (@(Get-ArchiveFileList $zv | ForEach-Object path | Sort-Object) -join ',') -eq 'Option A\archive\pc\mod\a.archive,Option B\archive\pc\mod\b.archive,readme.txt') "T32 one archive listing for variants and previews: $(@($cv.candidates) -join ', ')"
+    $zs = Join-Path $Sb 'friend-settings.zip'; $cetX = 'bin/x64/plugins/cyber_engine_tweaks/mods/X'
+    $zw = [IO.Compression.ZipFile]::Open($zs, 'Create')
+    try {
+        foreach ($n in "$cetX/init.lua", "$cetX/config.json", 'r6/scripts/X/config.reds') { $sw = [IO.StreamWriter]::new($zw.CreateEntry($n).Open()); $sw.Write('x'); $sw.Dispose() }
+        $sw = [IO.StreamWriter]::new($zw.CreateEntry('manifest.json').Open())
+        $sw.Write((ConvertTo-Json @{ format = 'cpmods-settings'; version = 1; at = (Get-Date).ToString('s'); kind = 'manual'; reason = ''; files = @(@{ path = "$cetX/init.lua" }, @{ path = "$cetX/config.json" }, @{ path = 'r6/scripts/X/config.reds' }) } -Depth 4)); $sw.Dispose()
+    }
+    finally { $zw.Dispose() }
+    $imp = Import-ModSettings ([Convert]::ToBase64String([IO.File]::ReadAllBytes($zs)))
+    Check ($imp.count -eq 1 -and $imp.code -eq 2) "T32 a friend's settings zip keeps config.json and leaves out init.lua and .reds ($($imp.count) kept, $($imp.code) left out)"
+
+    Write-Host '--- T33: the server refuses requests without the token, from another host or another web page'
+    Copy-Item (Join-Path (Split-Path $PSScriptRoot) 'server.ps1') $Sb; Copy-Item (Join-Path (Split-Path $PSScriptRoot) 'ui') $Sb -Recurse
+    $env:CPMODS_NOLAUNCH = '1'
+    $srv = Start-Process (Get-Command pwsh).Source -ArgumentList '-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', "`"$Sb\server.ps1`"", '-Dev' -WindowStyle Hidden -PassThru
+    $hc = [Net.Http.HttpClient]::new(); $hc.Timeout = [TimeSpan]::FromSeconds(20)
+    try {
+        $info = $null
+        for ($i = 0; $i -lt 60 -and -not $info; $i++) { Start-Sleep -Milliseconds 500; $info = try { Get-Content "$Sb\state\server-dev.json" -Raw | ConvertFrom-Json } catch { $null } }
+        if (-not $info) { throw 'the test server did not start' }
+        $base = "http://localhost:$($info.port)"
+        $call = { param([string]$Method, [string]$Path, [hashtable]$H, [string]$Body, [string]$HostName)
+            $rq = [Net.Http.HttpRequestMessage]::new([Net.Http.HttpMethod]::new($Method), "$base$Path")
+            foreach ($k in @($H.Keys)) { [void]$rq.Headers.TryAddWithoutValidation($k, "$($H[$k])") }
+            if ($HostName) { $rq.Headers.Host = $HostName }
+            if ($Body) { $rq.Content = [Net.Http.StringContent]::new($Body, [Text.Encoding]::UTF8, 'application/json') }
+            $rs = $hc.SendAsync($rq).GetAwaiter().GetResult()
+            [pscustomobject]@{ code = [int]$rs.StatusCode; text = $rs.Content.ReadAsStringAsync().GetAwaiter().GetResult() } }
+        $tok = @{ 'X-Cp-Token' = "$($info.token)" }
+        Check ((& $call 'GET' '/api/state' $tok).code -eq 200) 'T33 with the token: answered'
+        foreach ($p in '/api/state', '/api/ping', '/api/modlist') { Check ((& $call 'GET' $p @{}).code -eq 403) "T33 no token: refused ($p)" }
+        Check ((& $call 'GET' '/api/state' @{ 'X-Cp-Token' = 'wrong' }).code -eq 403) 'T33 a wrong token: refused'
+        Check ((& $call 'GET' '/api/state' $tok '' "evil.example:$($info.port)").code -in 400, 403) 'T33 another Host name (DNS rebinding): refused'
+        $before = Get-Content "$Sb\state\settings.json" -Raw -ErrorAction SilentlyContinue
+        $r = & $call 'POST' '/api/settings' ($tok + @{ Origin = 'http://evil.example' }) '{"launchMode":"direct"}'
+        Check ($r.code -eq 403 -and (Get-Content "$Sb\state\settings.json" -Raw -ErrorAction SilentlyContinue) -eq $before) 'T33 a request from another web page: refused, nothing changed'
+        foreach ($p in '/config.json', '/state/nexus.key', '/lib/cpmods.psm1') { Check ((& $call 'GET' $p @{}).code -eq 404) "T33 only UI files are served ($p)" }
+        # an encoded ..\ is refused by Windows' HTTP layer itself (403/400) before cpmods sees it
+        Check ((& $call 'GET' '/..%5Cconfig.json' @{}).code -in 400, 403, 404) 'T33 an encoded ..\ path is not served'
+        Check ((& $call 'GET' '/' @{}).text -match [regex]::Escape("$($info.token)")) 'T33 the page itself carries the token (other web pages cannot read it)'
+        [void](& $call 'POST' '/api/system' $tok '{"op":"quit"}')
+        Check ($srv.WaitForExit(15000)) 'T33 quit with the token stops it'
+    }
+    finally { $hc.Dispose(); if (-not $srv.HasExited) { Stop-Process -Id $srv.Id -Force -ErrorAction SilentlyContinue }; Remove-Item Env:CPMODS_NOLAUNCH -ErrorAction SilentlyContinue }
 }
 catch { $script:fails++; Write-Host "FAIL (stopped): $($_.Exception.Message)" -ForegroundColor Red }
 finally {
