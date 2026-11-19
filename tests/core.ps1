@@ -521,6 +521,13 @@ try {
     Check ($fake.cur -eq 2 -and -not (Test-Path $mf) -and $null -eq $sh.mouse.want) 'T35 already on the game profile: nothing to restore later'
     $sh.mouse.want = 'back'; Sync-CpMouse $sh
     Check ($fake.cur -eq 2 -and $null -eq $sh.mouse.want) 'T35 nothing remembered: the profile is left alone'
+    $sx = [hashtable]::Synchronized(@{ jobs = [hashtable]::Synchronized(@{}); stop = $false; winOpen = $false; byeAt = [datetime]::UtcNow.AddMinutes(-1); lastSeen = [datetime]::UtcNow.AddMinutes(-2); gameRun = $true; mouse = $sh.mouse })
+    Write-JsonFile $mf ([ordered]@{ prev = 1; game = 2 })
+    Check (-not (Test-CpShouldExit $sx)) 'T35 window closed while playing on the game profile: the server stays'
+    $sx.gameRun = $false; $sh.mouse.want = 'back'
+    Check (-not (Test-CpShouldExit $sx)) 'T35 the game closed, profile not back yet: it stays'
+    Sync-CpMouse $sh
+    Check ((Test-CpShouldExit $sx) -and $fake.cur -eq 1) 'T35 profile back: it may leave'
 
     Write-Host '--- T33: the server refuses requests without the token, from another host or another web page'
     Copy-Item (Join-Path (Split-Path $PSScriptRoot) 'server.ps1') $Sb; Copy-Item (Join-Path (Split-Path $PSScriptRoot) 'ui') $Sb -Recurse

@@ -687,6 +687,9 @@ function Test-CpShouldExit($Shared) {
         $v = try { Read-JsonFile $vf } catch { $null }
         if ($v -and ($Shared.gameRun -or (-not $v.gameSeen -and ((Get-Date) - [datetime]$v.started).TotalMinutes -lt 10))) { return $false }
     }
+    # a mouse profile to put back (Sync-CpMouse): stay while the game runs with the game profile on, and until it is back
+    $mo = $Shared.mouse
+    if ($mo -and ($mo.busy -or "$($mo.want)" -eq 'back' -or ($Shared.gameRun -and [IO.File]::Exists((Join-Path (Get-CpPaths).state 'mouse.json'))))) { return $false }
     # the built-in window may be suspended (minimized) and silent: it ends the server when it closes
     if ($Shared.winOpen) { return $false }
     $now = [datetime]::UtcNow
