@@ -124,7 +124,7 @@
     b: Object.assign({ q: '', sort: 'endorsements', cat: '', tag: '', compat: 'likely', hideTr: true, hideAdult: true, hideCheats: true, hideCosmetic: false, view: 'grid' }, prefs.b || {},
       { items: [], offset: 0, total: 0, hidden: 0, loading: false, loaded: false, end: false, err: null, seq: 0, rendered: 0, renderSeq: -1 }),
     c: Object.assign({ q: '', sort: 'endorsements', cat: '', only: false, adult: false }, prefs.c || {}, { all: null, loading: false, err: null }),
-    lib: Object.assign({ filter: 'all', q: '', sort: 'name', kind: '', src: '', view: 'list' }, prefs.lib || {}, { updates: null, fw: null, checking: false, compat: null, compatLoading: false, files: null, filesSig: '', filesLoading: false, mapOpen: new Set() }),
+    lib: Object.assign({ filter: 'all', q: '', sort: 'name', kind: '', src: '', view: 'list' }, prefs.lib || {}, { updates: null, fw: null, updSel: {}, checking: false, compat: null, compatLoading: false, files: null, filesSig: '', filesLoading: false, mapOpen: new Set() }),
     dl: Object.assign({ arch: 'all', sort: 'new', jobs: 'all' }, prefs.dl || {}, { variant: null, q: '', showDone: false }),
     launch: { data: null, loading: false, err: null, key: '' },
     rep: { mods: 'problems', tab: '', showHidden: false },
@@ -980,7 +980,13 @@
     const off = st.disabled.map(d => Object.assign({}, d, { on: false, fw: false, kinds: arr(d.kinds) }));
     return on.concat(off).sort((a, b) => a.name.localeCompare(b.name));
   }
-  const hasUpdate = m => !!((S.lib.updates && S.lib.updates[m.name]) || (m.fw && (S.lib.fw || []).some(x => x.name === m.name && x.update)));
+  // the newer file the last check found, until the mod is on it; frameworks compare versions
+  const upOf = m => { const u = S.lib.updates && S.lib.updates[m.name]; return u && +u.fileId !== +m.fileId ? u : null; };
+  const fwOf = m => m.fw ? (S.lib.fw || []).find(x => x.name === m.name && x.update && x.latest !== m.version) || null : null;
+  const inQueue = fid => S.st.queue.some(q => !q.done && +q.fileId === +fid);
+  const hasUpdate = m => !!(upOf(m) || fwOf(m));
+  // updates that can go in a batch (not queued already)
+  const batchable = () => libItems().filter(m => (upOf(m) && !inQueue(upOf(m).fileId)) || fwOf(m));
   const srcOf = m => { const s = String(m.source || ''); return /^adopted/.test(s) || m.adopted ? 'adopted' : /^nexus:/.test(s) ? 'nexus' : /^github:/.test(s) ? 'github' : 'manual'; };
   const SRC_LABEL = { nexus: 'Nexus', github: 'GitHub', adopted: 'Found in game folder', manual: 'Manual' };
   // conflicts that involve a mod (skips ones marked fine and intended overlaps)
@@ -1081,25 +1087,31 @@
       box.innerHTML = `<div class="card"><div class="empty">${empty ? `<h3>No mods yet</h3>Find mods in Discover, or let cpmods take over mods you installed before.<br><button class="btn primary" data-act="go" data-page="discover">Browse mods</button> <button class="btn" data-act="tool" data-tool="discover">Find existing mods</button>` : L.filter === 'upd' && !L.updates ? `<h3>Updates not checked yet</h3><button class="btn primary" data-act="lib-updates">Check for updates</button>` : L.filter === 'issues' && !L.compat ? `<h3>Compatibility not checked yet</h3><button class="btn primary" data-act="tool" data-tool="compat">Check now</button>` : '<h3>Nothing here</h3>No mods match these filters.'}</div></div>`;
       return;
     }
-    box.innerHTML = `<div class="card"><div class="list">${items.map(libRow).join('')}</div></div>`;
+    // Updates view: tick the ones to update, then one button for all of them
+    const bat = L.filter === 'upd' ? batchable() : [], sel = bat.filter(m => L.updSel[m.name] !== false);
+    const bar = bat.length ? `<div class="action-card" style="margin-bottom:12px"><div class="action-row"><label class="check-row" style="flex:none" title="Select all"><input type="checkbox" class="check" id="upd-all"${sel.length === bat.length ? ' checked' : ''} aria-label="Select all updates"></label>
+      <div class="action-file"><b>${sel.length} of ${plural(bat.length, 'update')} selected</b><span>A restore point is made first.${bat.some(m => !fwOf(m)) ? ' Each Nexus file needs one "Slow download" click; the next page opens by itself.' : ''}</span></div>
+      <button class="btn primary" data-act="upd-batch"${sel.length ? '' : ' disabled'}>${ic('refresh')}${sel.length === bat.length ? 'Update all' : `Update ${sel.length} selected`}</button></div></div>` : '';
+    box.innerHTML = bar + `<div class="card"><div class="list">${items.map(libRow).join('')}</div></div>`;
   }
   function libRow(m) {
     const src = srcOf(m), nx = String(m.source || '').match(/nexus:(\d+)/);
-    const up = S.lib.updates && S.lib.updates[m.name], fwu = m.fw && (S.lib.fw || []).find(x => x.name === m.name && x.update);
+    const up = upOf(m), fwu = fwOf(m), queued = up && inQueue(up.fileId);
     const iss = modIssues(m.name), wr = worstRisk(iss), isNew = isNewSinceLaunch(m);
     const pills = [m.fw ? '<span class="pill">Framework</span>' : '', src === 'adopted' ? '<span class="pill muted" title="Installed before cpmods; removing sends its files to the Recycle Bin">Existing files</span>' : '',
       isNew ? '<span class="pill info" title="Installed after your last launch: not tested in game yet">New</span>' : '',
       wr === 'high' || wr === 'medium' ? `<span class="pill ${RISK[wr][0]}" title="${h(iss.map(i => i.title).join('\n'))}">${wr === 'high' ? 'Risky conflict' : 'Check conflict'}</span>` : '',
-      up ? `<span class="pill warn">v${h(up.version)} available</span>` : '', fwu ? `<span class="pill warn">${h(fwu.latest)} available</span>` : '', m.broken ? '<span class="pill bad">Incomplete install</span>' : ''].join('');
+      up ? (queued ? `<span class="pill info" title="Waiting in the download queue">v${h(up.version)} queued</span>` : `<span class="pill warn">v${h(up.version)} available</span>`) : '', fwu ? `<span class="pill warn">${h(fwu.latest)} available</span>` : '', m.broken ? '<span class="pill bad">Incomplete install</span>' : ''].join('');
     const sub = [(m.kinds || []).length ? `<span class="kchips">${kindChips(m.kinds)}</span>` : '', SRC_LABEL[src], m.on ? (m.installed ? 'added ' + fmtDate(m.installed) : '') : 'off since ' + fmtDate(m.disabledAt),
       m.fileCount != null ? plural(m.fileCount, 'file') + (m.size ? ' &middot; ' + fmtSize(m.size) : '') : ''].filter(Boolean).map(x => `<span>${x}</span>`).join('');
     const sw = m.fw ? '<span class="switch" title="Frameworks stay on; other mods need them"><input type="checkbox" checked disabled><span></span></span>'
       : `<label class="switch" title="${m.on ? 'On: click to disable (files are set aside, not deleted)' : 'Off: click to enable'}"><input type="checkbox" data-toggle="${h(m.name)}"${m.on ? ' checked' : ''} aria-label="${m.on ? 'Disable' : 'Enable'} ${h(m.name)}"><span></span></label>`;
-    const acts = (up && nx ? `<button class="btn sm primary" data-act="get" data-mod="${nx[1]}" data-file="${+up.fileId}" data-name="${h(m.name)}" title="Opens the new file on Nexus; click Slow download there">Update</button>` : '')
+    const pick = S.lib.filter === 'upd' && ((up && !queued) || fwu) ? `<label class="check-row" style="flex:none" title="Include in the batch update"><input type="checkbox" class="check" data-usel="${h(m.name)}"${S.lib.updSel[m.name] === false ? '' : ' checked'} aria-label="Update ${h(m.name)}"></label>` : '';
+    const acts = (up && nx && !queued ? `<button class="btn sm primary" data-act="get" data-mod="${nx[1]}" data-file="${+up.fileId}" data-name="${h(m.name)}" title="Opens the new file on Nexus; click Slow download there">Update</button>` : '')
       + (fwu ? '<button class="btn sm primary" data-act="fw-sync">Update</button>' : '')
       + `<button class="icon-btn" data-act="row-menu" data-name="${h(m.name)}" title="More actions" aria-label="More actions for ${h(m.name)}">${ic('more')}</button>`;
     const sel = m.modId ? 'mod:' + (+m.modId) : 'files:' + m.name;
-    return `<div class="li lib-row click${m.on ? '' : ' off'}${selKey() === sel ? ' selected' : ''}" data-act="lib-open" data-name="${h(m.name)}" data-sel="${h(sel)}" tabindex="0" title="Show details and files">${sw}<div class="li-main"><div class="li-title"><span class="t">${h(m.name)}</span>${m.version ? `<span class="ver">${h(m.version)}</span>` : ''}${pills}</div><div class="li-sub">${sub}</div></div><div class="li-acts">${acts}</div></div>`;
+    return `<div class="li lib-row click${m.on ? '' : ' off'}${selKey() === sel ? ' selected' : ''}" data-act="lib-open" data-name="${h(m.name)}" data-sel="${h(sel)}" tabindex="0" title="Show details and files">${pick}${sw}<div class="li-main"><div class="li-title"><span class="t">${h(m.name)}</span>${m.version ? `<span class="ver">${h(m.version)}</span>` : ''}${pills}</div><div class="li-sub">${sub}</div></div><div class="li-acts">${acts}</div></div>`;
   }
   async function ensureCompat(force) {
     if (S.lib.compatStale) force = true;
@@ -1170,15 +1182,32 @@
         if (!best && cur && !LIVE.includes(cur.category)) { const mains = live.filter(f => f.category === 'MAIN'); if (mains.length === 1) best = mains[0]; }
         if (best) ups[m.name] = best;
       }
-      S.lib.updates = ups;
+      S.lib.updates = ups; S.lib.updSel = {};
       try { S.lib.fw = (await api('/api/fwupdates')).items || []; } catch (e) { S.lib.fw = []; }
       const n = Object.keys(ups).length + S.lib.fw.filter(x => x.update).length;
-      toast(n ? `${plural(n, 'update')} available` : 'Everything is up to date', n ? 'Use the Update buttons in the list.' : '', n ? 'warn' : 'ok', 5000);
+      toast(n ? `${plural(n, 'update')} available` : 'Everything is up to date', n ? 'Update them all with one button, or untick the ones to skip.' : '', n ? 'warn' : 'ok', 5000);
       if (n) S.lib.filter = 'upd';
     } catch (e) { toast('Update check failed', e.message, 'bad'); }
     S.lib.checking = false;
     if (S.page === 'library') pageLibrary($('#page'));
     else if (S.page === 'reports') renderReportsBody();
+  }
+
+  // the ticked updates: a restore point, then frameworks from GitHub and Nexus files through the queue,
+  // queued under the mod's own name so each one replaces the installed version
+  async function updateSelected() {
+    const pick = batchable().filter(m => S.lib.updSel[m.name] !== false);
+    if (!pick.length) return;
+    const fws = pick.filter(fwOf), mods = pick.filter(m => !fwOf(m));
+    const body = planGrp(`From Nexus (${mods.length})`, mods.map(m => `${m.name}: ${m.version || '?'} to ${upOf(m).version}`))
+      + planGrp(`Frameworks from GitHub (${fws.length})`, fws.map(m => `${m.name}: ${m.version || '?'} to ${fwOf(m).latest}`))
+      + `<p class="dim small">cpmods makes a restore point first and keeps the old downloads, so you can go back.${mods.length ? ' Each Nexus file needs one "Slow download" click; the next page opens by itself, and each update installs when it arrives.' : ''}</p>`;
+    if (!await ask({ title: `Update ${plural(pick.length, 'mod')}?`, body, ok: 'Update' })) return;
+    try { await api('/api/backups', { op: 'point', label: `Before updating ${plural(pick.length, 'mod')}` }); }
+    catch (e) { toast('Nothing was updated', `The restore point failed: ${e.message}`, 'bad', 10000); return; }
+    if (fws.length) await action({ op: 'frameworks', names: fws.map(m => m.name) }, 'Updating frameworks');
+    if (mods.length) await queueAdd(mods.map(m => ({ modId: +m.modId, fileId: +upOf(m).fileId, name: m.name, why: `Update to ${upOf(m).version}` })), true);
+    if (S.page === 'library') renderLibBody();
   }
 
   // ---------- downloads ----------
@@ -1367,7 +1396,7 @@
     if (i.crash) acts.push(`<button class="btn sm" data-act="open-crash" data-id="${h(i.crash)}">Crash details</button>`);
     if (i.level === 'bad' && i.crash) acts.push(`<button class="btn sm ghost" data-act="bisect-open">${ic('bug')}Find the problem mod</button>`);
     if (m) {
-      const nx = String(m.source || '').match(/nexus:(\d+)/), up = S.lib.updates && S.lib.updates[m.name];
+      const nx = String(m.source || '').match(/nexus:(\d+)/), up = upOf(m);
       if (up && nx) acts.push(`<button class="btn sm primary" data-act="get" data-mod="${nx[1]}" data-file="${+up.fileId}" data-name="${h(m.name)}" title="Opens the new file on Nexus; click Slow download there">${ic('dl')}Update to v${h(String(up.version).replace(/^v/i, ''))}</button>`);
       if (m.on && !m.fw) acts.push(`<button class="btn sm" data-act="issue-off" data-name="${h(m.name)}" title="Its files are set aside, not deleted. Turn it back on in the Library at any time.">Turn off</button>`);
       else if (!m.on) acts.push('<span class="pill muted">Off now</span>');
@@ -2887,6 +2916,7 @@
     'b-compat': t => { S.b.compat = t.dataset.v; savePrefs(); document.querySelectorAll('[data-act="b-compat"]').forEach(b => b.classList.toggle('on', b.dataset.v === S.b.compat)); loadBrowse(true); },
     'lib-filter': t => { S.lib.filter = t.dataset.v; renderLibBody(); },
     'lib-updates': () => checkUpdates(),
+    'upd-batch': () => updateSelected(),
     'lib-more': t => openMenu(t, [{ label: 'Key bindings', act: 'tool', data: { tool: 'keys' }, icon: 'key' }, { label: 'Find existing mods', act: 'tool', data: { tool: 'discover' }, icon: 'scan' }, { label: 'Check game logs', act: 'tool', data: { tool: 'gamelog' }, icon: 'info' }, { label: 'Update frameworks', act: 'fw-sync', icon: 'refresh' }, { label: 'Modpacks: share or get mods', act: 'tool', data: { tool: 'packs' }, icon: 'collections' }, '-', { label: 'Open game folder', act: 'sys', data: { op: 'folder' }, icon: 'folder' }]),
     'map-loc': t => { const o = S.lib.mapOpen, k = t.dataset.k; if (o.has(k)) o.delete(k); else o.add(k); renderLibList(); },
     'map-all': () => { const o = S.lib.mapOpen, ks = [...document.querySelectorAll('[data-act="map-loc"]')].map(b => b.dataset.k), all = ks.every(k => o.has(k)); ks.forEach(k => { if (all) o.delete(k); else o.add(k); }); renderLibList(); },
@@ -3075,6 +3105,8 @@
     else if (t.id === 'lib-src') { S.lib.src = t.value; savePrefs(); renderLibList(); }
     else if (t.id === 'lib-sort') { S.lib.sort = t.value; savePrefs(); renderLibList(); }
     else if (t.id === 'dl-sort') { S.dl.sort = t.value; savePrefs(); renderDlBody(); }
+    else if (d.usel) { S.lib.updSel[d.usel] = t.checked; renderLibList(); }
+    else if (t.id === 'upd-all') { batchable().forEach(m => { S.lib.updSel[m.name] = t.checked; }); renderLibList(); }
     else if (d.toggle) action({ op: t.checked ? 'enable' : 'disable', name: d.toggle }, `${t.checked ? 'Enabling' : 'Disabling'} ${d.toggle}`);
     else if (d.disc && S.pane && S.pane.sel) { S.pane.sel[d.disc] = t.checked; renderPane(); }
     else if (d.bsel && S.pane && S.pane.kind === 'bisect') { S.pane.sel = S.pane.sel || {}; S.pane.sel[d.bsel] = t.checked; S.pane.scope = 'custom'; renderPane(); }

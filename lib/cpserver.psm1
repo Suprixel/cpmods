@@ -81,7 +81,8 @@ catch { $e = $_.Exception.Message; Use-Lock { [void](Restore-VanillaSession) }; 
 '@
     frameworks  = @'
 param($Job, $P, $Shared)
-$r = Use-Lock { Invoke-Frameworks }
+Save-AutoSafety 'Before updating frameworks'
+$r = Use-Lock { Invoke-Frameworks -Names @($P.names | Where-Object { $_ }) }
 $Shared.cache.Remove('fwupdates')
 (@($r) | Where-Object { "$_" -notmatch 'up to date' }) -join '; '
 '@
@@ -576,7 +577,7 @@ function Invoke-CpRequest {
                     'remove' { $j = Start-CpJob $Shared 'remove' "Remove $($b.name)" @{ name = "$($b.name)"; purge = [bool]$b.purge }; Send-Json $Ctx @{ ok = $true; job = $j.id } }
                     'disable' { $j = Start-CpJob $Shared 'disable' "Disable $($b.name)" @{ name = "$($b.name)" }; Send-Json $Ctx @{ ok = $true; job = $j.id } }
                     'enable' { $j = Start-CpJob $Shared 'enable' "Enable $($b.name)" @{ name = "$($b.name)" }; Send-Json $Ctx @{ ok = $true; job = $j.id } }
-                    'frameworks' { $j = Start-CpJob $Shared 'frameworks' 'Update frameworks' @{}; Send-Json $Ctx @{ ok = $true; job = $j.id } }
+                    'frameworks' { $j = Start-CpJob $Shared 'frameworks' 'Update frameworks' @{ names = @($b.names | ForEach-Object { "$_" }) }; Send-Json $Ctx @{ ok = $true; job = $j.id } }
                     'adopt' { $j = Start-CpJob $Shared 'adopt' "Adopt $(@($b.items).Count) existing mods" @{ items = @($b.items) }; Send-Json $Ctx @{ ok = $true; job = $j.id } }
                     'sync' { $j = Start-CpJob $Shared 'sync' 'Install frameworks and waiting mods' @{}; Send-Json $Ctx @{ ok = $true; job = $j.id } }
                     'dismiss' { $n = Use-Lock { Remove-Deferred "$($b.name)" }; Send-Json $Ctx @{ ok = $true; removed = $n } }

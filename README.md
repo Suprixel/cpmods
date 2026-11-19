@@ -5,6 +5,7 @@ A simple mod manager for Cyberpunk 2077 on Windows. Find mods on Nexus, click "S
 ## What it does
 
 - **Installs from Nexus.** Browse and search Nexus inside the app, or queue a list of mods. Clicking "Slow download" on Nexus hands the file to cpmods, which checks it and installs it.
+- **Updates in one go.** "Check for updates" looks at all your Nexus mods and frameworks at once. Update them all with one button, or untick the ones to skip; a restore point is made first.
 - **Never loses a game file.** Every file a mod replaces is backed up and put back when you remove the mod. When two mods ship the same file, you choose: use the new copy, keep the old one, or combine both (for JSON settings files). Removing either mod gives the other its own copy back.
 - **Frameworks.** Installs and updates CET, RED4ext, redscript, ArchiveXL, TweakXL, Codeware, Mod Settings and Input Loader from their GitHub releases.
 - **Safety nets.** Restore points of your whole mod setup, copies of your saves before a launch with changed mods, and backups of mod settings (CET mods, Mod Settings, hotkeys).

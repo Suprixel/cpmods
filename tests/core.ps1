@@ -416,6 +416,15 @@ try {
     & $nx 'PackKeep' 9003 31 '3.0' (New-TestMod 'PackKeep3' @{ 'archive\pc\mod\pkeep.archive' = 'k3' })
     $pk = (Get-State).mods | Where-Object name -eq 'PackKeep'
     Check ($pk.fileId -eq 31 -and @($pk.older) -contains "$Sb\src\PackKeep.zip" -and -not ((Get-State).disabled | Where-Object name -eq 'PackKeep')) 'T28 replacing a turned-off mod keeps its download for going back'
+
+    Write-Host '--- T29: updating chosen frameworks only'
+    '[{"name":"FwA","repo":"a/a","asset":"x"},{"name":"FwB","repo":"b/b","asset":"x"}]' | Set-Content "$Sb\frameworks.json"
+    $origFw = & (Get-Module cpmods) { ${function:Install-GitHubFramework} }
+    & (Get-Module cpmods) { function script:Install-GitHubFramework($Fw) { "did $($Fw.name)" } }
+    try {
+        Check ((@(Invoke-Frameworks -Names 'FwB') -join ',') -eq 'did FwB' -and (@(Invoke-Frameworks) -join ',') -eq 'did FwA,did FwB' -and (@(Invoke-Frameworks -Names @()) -join ',') -eq 'did FwA,did FwB') 'T29 -Names limits the update; none named = all'
+    }
+    finally { & (Get-Module cpmods) { param($f) Set-Item function:script:Install-GitHubFramework $f } $origFw; '[]' | Set-Content "$Sb\frameworks.json" }
 }
 catch { $script:fails++; Write-Host "FAIL (stopped): $($_.Exception.Message)" -ForegroundColor Red }
 finally {

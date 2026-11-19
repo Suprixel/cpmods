@@ -839,11 +839,12 @@ function Install-GitHubFramework($Fw, [switch]$DownloadOnly, [switch]$Force) {
     "$($Fw.name) $($rel.tag_name) installed"
 }
 
-function Invoke-Frameworks([switch]$Force) {
+# -Names: only these frameworks (none = all)
+function Invoke-Frameworks([switch]$Force, [string[]]$Names) {
     $pending = (Get-GameState).updatePending -and -not $Force
     if ($pending) { Write-Note 'Steam update pending: downloading frameworks only.' Yellow }
     # one framework failing (GitHub down or rate-limited) must not stop the others or the waiting mods after them
-    foreach ($fw in Get-Frameworks) {
+    foreach ($fw in @(Get-Frameworks | Where-Object { -not $Names -or $Names -contains $_.name })) {
         try { Install-GitHubFramework $fw -DownloadOnly:$pending -Force:$Force }
         catch { Write-Note "  $($fw.name) not updated: $($_.Exception.Message)" Yellow; "$($fw.name) not updated: $($_.Exception.Message)" }
     }
