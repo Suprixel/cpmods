@@ -33,7 +33,8 @@ function Write-Note([string]$Msg, [string]$Color = 'Gray') {
     for ($i = 0; $i -lt 8; $i++) { try { [IO.File]::AppendAllText($script:LogFile, $line); break } catch { Start-Sleep -Milliseconds 40 } }
 }
 
-function Get-SafeName([string]$N) { $N -replace '[^\w\-. ]', '_' }
+# a name of only dots and spaces (possible in a shared mod list) would turn into '.' or '..' inside a path
+function Get-SafeName([string]$N) { $s = $N -replace '[^\w\-. ]', '_'; if ($s -notmatch '\w') { $s = "_$s" }; $s }
 function Get-SafeFileName([string]$N) {
     $bad = [IO.Path]::GetInvalidFileNameChars()
     -join ("$N".ToCharArray() | ForEach-Object { if ($bad -contains $_) { '_' } else { $_ } })
@@ -480,6 +481,7 @@ function Install-ModArchive {
     Assert-GameReady -Force:$Force
     if ($OnConflict -and $OnConflict -notin 'keep', 'overwrite', 'merge') { throw "Unknown choice $OnConflict" }
     if (-not (Test-Path -LiteralPath $Archive)) { throw "Archive not found: $Archive" }
+    if ($Meta.sub -and ([IO.Path]::IsPathRooted("$($Meta.sub)") -or "$($Meta.sub)" -match '(^|[\\/])\.\.([\\/]|$)')) { throw "Invalid folder in the archive: $($Meta.sub)" }
     $tmp = Join-Path $script:TmpDir ([guid]::NewGuid().ToString('N'))
     [void](New-Item -ItemType Directory -Path $tmp)
     try {
@@ -556,13 +558,17 @@ function Install-ModArchive {
         if ($copyError) { $rec.broken = $copyError }
         # its earlier downloads, newest first: the last two stay for going back (Remove-OldDownloads deletes the rest)
         $older = [Collections.Generic.List[string]]::new()
-        foreach ($a in @($old.archive) + @($old.older) + @($Meta.older)) { if ($a -and "$a" -ne $Archive -and -not $older.Contains("$a")) { $older.Add("$a") } }
+        # a turned-off copy of this mod is replaced too: its downloads stay for going back
+        $off = $s.disabled | Where-Object { $_.name -eq $Meta.name } | Select-Object -First 1
+        foreach ($a in @($old.archive) + @($old.older) + @($off.archive) + @($off.older) + @($Meta.older)) { if ($a -and "$a" -ne $Archive -and -not $older.Contains("$a")) { $older.Add("$a") } }
         if ($older.Count) { $rec.older = @($older | Select-Object -First 2) }
         $s.mods.Add($rec)
         foreach ($k in 'pending', 'failed', 'disabled') {
             foreach ($x in @($s[$k] | Where-Object { $(if ($k -eq 'disabled') { $_.name } else { $_.meta.name }) -eq $Meta.name })) { [void]$s[$k].Remove($x) }
         }
         Save-State $s
+        # its set-aside files (a mod found before cpmods) would be left behind unseen
+        if ($off.parked -and (Test-Path -LiteralPath $off.parked)) { Remove-ToRecycleBin $off.parked -Directory }
         if ($copyError) { throw "Copy failed after $($files.Count) files: $copyError" }
         if ($older.Count -gt 2 -and (Get-CpSettings).pruneOld) { Remove-OldDownloads $s @($older | Select-Object -Skip 2) }
         Write-Note "Installed $($Meta.name) $($Meta.version) ($($files.Count) files)" Green
@@ -1344,6 +1350,128 @@ function Export-ModList {
         mods = @($s.mods | Where-Object { "$($_.source)".StartsWith('nexus:') -and $_.fileId } | Sort-Object { $_.name } | ForEach-Object {
                 [ordered]@{ name = $_.name; modId = [int]$_.modId; fileId = [int]$_.fileId; version = $_.version; sub = $_.sub } })
     }
+}
+
+# Modpack code: "CPMODS" + base62 (letters and digits only: chats cannot reformat it, a double-click selects all of it).
+# Bytes: format 2, name, game version, count, then per mod (sorted) the modId gap * 2 (+1 when a sub folder follows) and
+# the fileId as varints, then 2 bytes of SHA-256 (a mistyped code is refused) and 0x01 (keeps leading zero bytes).
+# Names and versions are not in the code: Resolve-PackMods reads them from Nexus.
+$script:PackTag = 'CPMODS'
+$script:B62 = '0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz'
+function ConvertTo-PackCode([string]$Name, $Mods = (Export-ModList).mods) {
+    $Name = "$Name".Trim()
+    if ($Name.Length -gt 60) { throw 'Give the modpack a name of up to 60 characters' }
+    $Mods = @($Mods | Sort-Object { [int]$_.modId }, { [int]$_.fileId })
+    if (-not $Mods.Count) { throw 'No Nexus mods are on, so there is nothing to share' }
+    $w = [IO.MemoryStream]::new()
+    $num = { param([long]$v) do { $b = [byte]($v -band 0x7F); $v = $v -shr 7; if ($v) { $b = $b -bor 0x80 }; $w.WriteByte($b) } while ($v) }
+    $str = { param([string]$s) $b = [Text.Encoding]::UTF8.GetBytes($s); & $num $b.Length; $w.Write($b, 0, $b.Length) }
+    $w.WriteByte(2); & $str $Name; & $str "$((Get-GameState).version)"; & $num $Mods.Count
+    $prev = 0
+    foreach ($m in $Mods) {
+        & $num (((([long]$m.modId) - $prev) -shl 1) -bor [long][bool]$m.sub); & $num ([long]$m.fileId)
+        if ($m.sub) { & $str "$($m.sub)" }
+        $prev = [long]$m.modId
+    }
+    $body = $w.ToArray()
+    $n = [Numerics.BigInteger]::new([byte[]]($body + [Security.Cryptography.SHA256]::HashData($body)[0..1] + 1))
+    $sb = [Text.StringBuilder]::new(); $r = [Numerics.BigInteger]::Zero
+    while ($n.Sign -gt 0) { $n = [Numerics.BigInteger]::DivRem($n, 62, [ref]$r); [void]$sb.Append($script:B62[[int]$r]) }
+    $c = $sb.ToString().ToCharArray(); [array]::Reverse($c)
+    [ordered]@{ code = $script:PackTag + [string]::new($c); count = $Mods.Count }
+}
+
+# A modpack from someone else (code, also inside a pasted message, or a mod list file): only well-formed Nexus entries get through
+function Read-ModPack([string]$Code, $List) {
+    if ($Code) {
+        $t = $Code.Trim()
+        # just the code (maybe wrapped over lines), or a message with the code in it
+        $c = if ($t.StartsWith($script:PackTag, [StringComparison]::Ordinal)) { $t -replace '\s', '' } else { [regex]::Match($t, "$($script:PackTag)[0-9A-Za-z]+").Value }
+        if ($c -notmatch "^$($script:PackTag)[0-9A-Za-z]{4,10000}$") { throw "No modpack code found: a code starts with $($script:PackTag)" }
+        $n = [Numerics.BigInteger]::Zero
+        foreach ($ch in $c.Substring($script:PackTag.Length).ToCharArray()) { $n = $n * 62 + $script:B62.IndexOf($ch) }
+        $all = $n.ToByteArray()
+        $bad = "This code is damaged or cut short: copy all of it, from $($script:PackTag) to the end"
+        if ($all.Length -lt 5 -or $all[-1] -ne 1) { throw $bad }
+        $body = [byte[]]$all[0..($all.Length - 4)]
+        $h = [Security.Cryptography.SHA256]::HashData($body)
+        if ($h[0] -ne $all[-3] -or $h[1] -ne $all[-2]) { throw $bad }
+        if ($body[0] -ne 2) { throw 'This code was made by a newer cpmods: update cpmods first' }
+        $p = @{ i = 1 }
+        $num = { $v = [long]0; $sh = 0; do { if ($p.i -ge $body.Length -or $sh -gt 35) { throw $bad }; $b = $body[$p.i]; $p.i++; $v = $v -bor ([long]($b -band 0x7F) -shl $sh); $sh += 7 } while ($b -band 0x80); $v }
+        $str = { $len = & $num; if ($p.i + $len -gt $body.Length) { throw $bad }; $s = [Text.Encoding]::UTF8.GetString($body, $p.i, $len); $p.i += $len; $s }
+        $pn = & $str; $pg = & $str
+        $List = @{ format = 'cpmods-modlist'; name = $pn; game = $pg; mods = [Collections.Generic.List[object]]::new() }
+        $count = & $num; $mid = [long]0
+        for ($k = 0; $k -lt $count; $k++) {
+            $x = & $num; $mid += $x -shr 1; $fid = & $num
+            $sub = if ($x -band 1) { & $str } else { $null }
+            $List.mods.Add(@{ modId = $mid; fileId = $fid; sub = $sub })
+        }
+    }
+    if ($List -isnot [Collections.IDictionary] -or $List.format -ne 'cpmods-modlist' -or $null -eq $List.mods) { throw 'This is not a cpmods modpack or mod list' }
+    $mods = [Collections.Generic.List[object]]::new(); $seen = @{}
+    foreach ($m in @($List.mods)) {
+        $mid = 0; $fid = 0
+        if ($m -isnot [Collections.IDictionary] -or -not [int]::TryParse("$($m.modId)", [ref]$mid) -or -not [int]::TryParse("$($m.fileId)", [ref]$fid) -or $mid -le 0 -or $fid -le 0 -or $seen[$fid]) { continue }
+        $seen[$fid] = $true
+        $sub = "$($m.sub)"
+        if ([IO.Path]::IsPathRooted($sub) -or $sub -match '(^|[\\/])\.\.([\\/]|$)') { $sub = '' }
+        $mods.Add([ordered]@{ modId = $mid; fileId = $fid; sub = $(if ($sub) { $sub } else { $null }) })
+    }
+    if (-not $mods.Count) { throw 'This modpack holds no Nexus mods' }
+    $pn = "$($List.name)".Trim()
+    [ordered]@{ name = $(if ($pn.Length -gt 60) { $pn.Substring(0, 60) } else { $pn }); game = "$($List.game)"; mods = @($mods) }
+}
+
+# Names, file names and versions of pack entries from Nexus (one request per 40 mods). Two files of one mod are
+# named "Mod - File", like a second download of a mod. Files Nexus no longer has come back in gone.
+function Resolve-PackMods($Mods) {
+    $ids = @($Mods | ForEach-Object { [int]$_.modId } | Sort-Object -Unique)
+    $names = @{}; $files = @{}
+    for ($i = 0; $i -lt $ids.Count; $i += 40) {
+        $chunk = $ids[$i..([Math]::Min($i + 39, $ids.Count - 1))]
+        $list = ($chunk | ForEach-Object { "{gameDomain: `"$($script:NexusGame)`", modId: $_}" }) -join ', '
+        $q = "{ legacyModsByDomain(ids: [$list], count: 50) { nodes { modId name } } " + (($chunk | ForEach-Object { "m$($_): modFiles(modId: $_, gameId: 3333) { fileId name version category }" }) -join ' ') + ' }'
+        $d = try { Invoke-NexusGql $q } catch { throw "Nexus did not answer, try again in a moment ($($_.Exception.Message))" }
+        foreach ($n in @($d.legacyModsByDomain.nodes)) { if ($n) { $names[[int]$n.modId] = "$($n.name)" } }
+        foreach ($id in $chunk) { foreach ($f in @($d."m$id")) { if ($f) { $files[[int]$f.fileId] = $f } } }
+    }
+    $ok = [Collections.Generic.List[object]]::new(); $gone = [Collections.Generic.List[string]]::new()
+    foreach ($e in $Mods) {
+        $f = $files[[int]$e.fileId]; $mn = $names[[int]$e.modId]
+        if (-not $f -or -not $mn -or $f.category -eq 'REMOVED') { $gone.Add($(if ($mn) { "$mn (file $($e.fileId))" } else { "Nexus mod $($e.modId)" })); continue }
+        $ok.Add([ordered]@{ name = $mn; modId = [int]$e.modId; fileId = [int]$e.fileId; version = "$($f.version)"; fileName = "$($f.name)"; sub = $e.sub })
+    }
+    foreach ($g in @($ok | Group-Object { $_.modId } | Where-Object Count -gt 1)) { foreach ($e in $g.Group) { $e.name = "$($e.name) - $($e.fileName)" } }
+    @{ mods = @($ok); gone = @($gone) }
+}
+
+# What getting a modpack changes here: new mods, mods you have (same file, on or off), mods you have in another
+# version (same name, or the same file of that Nexus mod; newer = the pack's file was uploaded later), frameworks you lack
+function Get-PackPlan($Pack) {
+    $s = Get-State
+    $local = @(@($s.mods | ForEach-Object { @{ m = $_; on = $true } }) + @($s.disabled | ForEach-Object { @{ m = $_; on = $false } }))
+    $names = @($local | ForEach-Object { "$($_.m.name)" })
+    $res = Resolve-PackMods $Pack.mods
+    $plan = [ordered]@{ name = $Pack.name; game = $Pack.game; total = @($Pack.mods).Count; new = @(); have = @(); turnOn = @(); versions = @(); frameworks = @(); gone = $res.gone }
+    $used = @{}
+    foreach ($e in $res.mods) {
+        $hit = $local | Where-Object { [int]$_.m.fileId -eq $e.fileId } | Select-Object -First 1
+        if ($hit) { $used[$hit.m.name] = $true; if ($hit.on) { $plan.have += $hit.m.name } else { $plan.turnOn += $hit.m.name }; continue }
+        $hit = $local | Where-Object { [int]$_.m.modId -eq $e.modId -and -not $used[$_.m.name] -and ($_.m.name -eq $e.name -or ($e.fileName -and $_.m.fileName -and (Get-NormName $_.m.fileName) -eq (Get-NormName $e.fileName))) } | Select-Object -First 1
+        if ($hit) {
+            $m = $hit.m; $used[$m.name] = $true
+            # queued under your name, so the download replaces your version instead of landing beside it
+            $plan.versions += [ordered]@{ name = $m.name; mine = "$($m.version)"; pack = $e.version; newer = [bool]($m.fileId -and $e.fileId -gt [int]$m.fileId); older = [bool]($m.fileId -and $e.fileId -lt [int]$m.fileId); on = $hit.on; back = [bool]($m.archive -and (Test-Path -LiteralPath $m.archive)); modId = $e.modId; fileId = $e.fileId; sub = $e.sub }
+            continue
+        }
+        # an unrelated mod here has the same name: a distinct name keeps the install from replacing it
+        if ($names -contains $e.name) { $e.name = "$($e.name) ($($e.modId))" }
+        $plan.new += $e
+    }
+    $plan.frameworks = @(Get-Frameworks | Where-Object { $names -notcontains $_.name } | ForEach-Object { "$($_.name)" })
+    $plan
 }
 
 # Adds Nexus files to the queue, skipping ones already installed or queued

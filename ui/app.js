@@ -1187,7 +1187,7 @@
     el.innerHTML = `
       <header class="page-head"><div class="ph-top">
         <div><h1>Downloads</h1><p class="sub">What is downloading, what is queued, and the archives cpmods keeps so mods can be turned back on. Click a row to open the mod.</p></div>
-        <div class="ph-actions"><button class="btn" data-act="modlist-import">${ic('plus')}Import mod list</button><input type="file" id="ml-file" accept=".json,application/json" hidden>
+        <div class="ph-actions"><button class="btn" data-act="tool" data-tool="packs" title="Get a friend's mods from a code, or share yours">${ic('collections')}Modpacks</button>
           <button class="btn primary" data-act="queue-next"${open ? '' : ' disabled'} title="Opens the next queued file on Nexus; click Slow download there">${ic('ext')}Open next download page${open ? ` (${open})` : ''}</button></div>
       </div>
       <div class="toolbar"><div class="searchbar sm" style="flex:1;max-width:460px">${ic('search')}<input type="search" id="dl-q" placeholder="Filter this page by name   ( / )" value="${h(S.dl.q)}" aria-label="Filter downloads"></div><span class="spacer"></span><button class="btn sm ghost" data-act="sys" data-op="downloads">${ic('folder')}Open downloads folder</button></div></header>
@@ -1678,7 +1678,7 @@
   function paneTitle(p) {
     if (p.kind === 'mod') return p.data ? decode(p.data.mod.name) : 'Mod';
     if (p.kind === 'col') return p.data ? decode(p.data.name) : 'Collection';
-    return { profiles: 'Profiles', compat: 'Compatibility', discover: 'Find existing mods', gamelog: 'Game logs', log: 'Activity log', files: p.name || 'Files', crash: 'Crash report', preview: p.file || 'Archive', bisect: 'Find the problem mod', backups: 'Backups', keys: 'Key bindings' }[p.kind] || 'Details';
+    return { profiles: 'Profiles', compat: 'Compatibility', discover: 'Find existing mods', gamelog: 'Game logs', log: 'Activity log', files: p.name || 'Files', crash: 'Crash report', preview: p.file || 'Archive', bisect: 'Find the problem mod', backups: 'Backups', keys: 'Key bindings', packs: 'Modpacks' }[p.kind] || 'Details';
   }
   function renderPane(reset) {
     const box = $('#paneBox'), el = $('#pane'), strip = $('#paneStrip');
@@ -1730,6 +1730,7 @@
     if (p.kind === 'backups') return backupsPane(p);
     if (p.kind === 'profiles') return profilesPane(p);
     if (p.kind === 'keys') return keysPane(p);
+    if (p.kind === 'packs') return packsPane(p);
     return '';
   }
 
@@ -2063,6 +2064,7 @@
     if (tool === 'backups') return runTool({ kind: 'backups', tab: S.pane && S.pane.kind === 'backups' ? S.pane.tab : 'points', plans: {} }, '/api/backups', null, mode);
     if (tool === 'profiles') return runTool({ kind: 'profiles' }, '/api/profiles', null, mode);
     if (tool === 'keys') return runTool({ kind: 'keys' }, '/api/keymap', null, mode);
+    if (tool === 'packs') return openPane({ kind: 'packs' }, mode);
   }
   async function runTool(p, url, after, mode) {
     p.loading = true;
@@ -2498,17 +2500,14 @@
       a.href = URL.createObjectURL(new Blob([JSON.stringify(r, null, 2)], { type: 'application/json' }));
       a.download = 'cpmods-modlist.json'; document.body.appendChild(a); a.click(); a.remove();
       setTimeout(() => URL.revokeObjectURL(a.href), 5000);
-      toast('Mod list saved to Downloads', `${r.mods.length} Nexus mods. A friend imports it in Downloads, Import mod list.`, 'ok', 8000);
+      toast('Mod list saved to Downloads', `${r.mods.length} Nexus mods. A friend opens it in Downloads, Modpacks.`, 'ok', 8000);
     } catch (e) { toast('Could not export', e.message, 'bad'); }
   }
+  // a mod list file goes through the same checks and choices as a modpack code
   async function importModList(file) {
-    try {
-      const j = JSON.parse(await file.text());
-      if (!j || j.format !== 'cpmods-modlist' || !Array.isArray(j.mods)) throw new Error('This is not a cpmods mod list file');
-      const items = j.mods.filter(m => +m.modId > 0 && +m.fileId > 0).map(m => ({ modId: +m.modId, fileId: +m.fileId, name: String(m.name || 'Mod ' + m.modId), sub: m.sub || undefined, why: 'From mod list' + (j.game ? ` (game ${j.game})` : '') }));
-      if (!await ask({ title: `Queue ${plural(items.length, 'mod')}?`, body: 'Mods you already have are skipped. Afterwards click "Open next download page".', ok: 'Queue them' })) return;
-      await queueAdd(items, false);
-    } catch (e) { toast('Could not import', e.message, 'bad'); }
+    let j;
+    try { j = JSON.parse(await file.text()); } catch (e) { toast('Could not import', 'This is not a cpmods mod list file.', 'bad'); return; }
+    packFlow({ list: j });
   }
   async function makePackage(appOnly) {
     toast('Creating share package', '', '', 2500);
@@ -2603,7 +2602,71 @@
     try { await api('/api/profiles', { op: 'delete', name }); await reloadProfiles(); refreshState(); }
     catch (e) { toast('Could not delete it', e.message, 'bad', 8000); }
   }
-  // groups of mod names in a "what changes" list (restore points, profiles)
+  // ---------- modpacks: a code (or mod list file) with Nexus mods to get, or one made from yours ----------
+  function packsPane(p) {
+    return toolShell(p, 'Modpacks', 'A modpack code is a short line of letters and digits listing Nexus mods and their versions. Paste a friend\'s code to get their mods, or make one from the mods you have on. Mods you already have are skipped, and cpmods makes a restore point first.', () => {
+      const busy = S.st.jobs.some(j => j.kind === 'pack' && j.status === 'running');
+      return `<div class="card"><div class="card-head"><h3>Get a modpack</h3></div><div class="card-body">
+          <textarea class="pack-code" id="pack-code" rows="4" spellcheck="false" autocomplete="off" placeholder="Paste a modpack code here, or the whole message with it. It starts with CPMODS" aria-label="Modpack code">${h(p.input || '')}</textarea>
+          <div class="toolbar" style="margin-top:10px"><button class="btn sm primary" data-act="pack-check"${busy ? ' disabled' : ''}>See what it changes</button><button class="btn sm ghost" data-act="modlist-import">Use a mod list file instead</button><input type="file" id="ml-file" accept=".json,application/json" hidden></div>
+          ${busy ? '<div class="helper"><span class="spin"></span> Getting a modpack; progress shows in the bar at the bottom.</div>' : ''}</div></div>
+        <div class="card" style="margin-top:12px"><div class="card-head"><h3>Share your mods</h3></div><div class="card-body">
+          <div class="keyrow prof-new"><input type="text" id="pack-name" maxlength="60" spellcheck="false" placeholder="A name for your modpack (optional)" aria-label="Modpack name" value="${h(p.name || '')}"><button class="btn sm primary" data-act="pack-make">Make a code</button></div>
+          ${p.code ? `<textarea class="pack-code" id="pack-out" rows="4" readonly aria-label="Your modpack code">${h(p.code)}</textarea>
+          <div class="toolbar" style="margin-top:10px"><button class="btn sm primary" data-act="pack-copy">Copy the code</button><span class="dim small">${plural(p.count, 'mod')}, ${p.code.length} characters.${p.code.length > 2000 ? ' Discord sends a code this long as a file: your friend opens it and copies the text.' : ''}</span></div>`
+          : '<p class="dim small" style="margin:0">The code lists the Nexus mods you have on, with their versions. Frameworks are left out: cpmods installs them by itself.</p>'}
+          <div class="toolbar" style="margin-top:10px"><button class="btn sm ghost" data-act="modlist-export">Save as a file instead</button></div></div></div>`;
+    });
+  }
+  // src: { code } or { list } (a mod list file). Shows what changes, asks about other versions, then gets the mods
+  async function packFlow(src) {
+    let pl;
+    toast('Reading the modpack', 'Looking up its mods on Nexus.', '', 2500);
+    try { pl = await api('/api/pack', Object.assign({ op: 'plan' }, src)); }
+    catch (e) { toast('Could not read the modpack', e.message, 'bad', 10000); return; }
+    const nw = arr(pl.new), on = arr(pl.turnOn), v = arr(pl.versions), fw = arr(pl.frameworks), have = arr(pl.have), gone = arr(pl.gone);
+    if (!nw.length && !on.length && !v.length && !fw.length) { toast('Nothing to get', gone.length ? `You have the rest; ${plural(gone.length, 'mod')} of it no longer on Nexus.` : `You already have all ${plural(pl.total, 'mod')} of this modpack.`, 'ok', 6000); return; }
+    if (S.st.game.running) { toast('Close the game first', 'Mods cannot change while it runs.', 'warn', 5000); return; }
+    // other versions: by default yours is updated where the pack has a newer file, never downgraded
+    const up = v.filter(x => x.newer), many = v.length > 1;
+    const vrows = v.length ? `<div class="bk-grp"><b>You have another version (${v.length})</b><div class="list">${v.map(x => `<label class="li check-row">${many ? `<input type="checkbox" class="check" data-pick="${h(x.name)}"${x.newer ? ' checked' : ''}>` : ''}<div class="li-main"><div class="li-title"><span class="t">${h(x.name)}</span>${x.newer ? '<span class="pill ok">newer in the pack</span>' : x.older ? '<span class="pill">older in the pack</span>' : ''}${x.on ? '' : '<span class="pill">off</span>'}</div><div class="li-sub"><span>yours ${h(x.mine || '?')}, the pack's ${h(x.pack || '?')}</span>${x.back ? '' : '<span class="bad-t">yours has no download left: replacing it cannot be undone</span>'}</div></div></label>`).join('')}</div></div>` : '';
+    const body = (pl.game ? `<p class="dim small" style="margin-top:0">Made with game version ${h(pl.game)}.</p>` : '')
+      + planGrp(`Downloaded (${nw.length})`, nw.map(m => m.name)) + planGrp('Turned back on', on) + planGrp('Frameworks installed', fw) + vrows
+      + planGrp(`No longer on Nexus, skipped (${gone.length})`, gone, 'bad-t')
+      + `<p class="dim small">${have.length ? `You already have ${plural(have.length, 'mod')} of it. ` : ''}Before anything changes, cpmods makes a restore point and a backup of your mod settings (Library, Backups), and it keeps the downloads of replaced versions, so you can go back. Each download needs one "Slow download" click on Nexus; the next page opens by itself.</p>`;
+    const options = [];
+    if (!v.length) options.push({ v: 'keep', label: 'Get the modpack', desc: [plural(nw.length, 'download'), on.length ? `${on.length} turned back on` : '', fw.length ? plural(fw.length, 'framework') : ''].filter(Boolean).join(', ') + '.' });
+    else {
+      if (up.length) options.push({ v: 'update', label: 'Update my mods', kind: 'primary', desc: `The pack's newer version for ${plural(up.length, 'mod')}.${up.length < v.length ? ` Where yours is newer (${v.length - up.length}), yours stays.` : ''}` });
+      options.push({ v: 'keep', label: many ? 'Keep my versions' : 'Keep my version', kind: up.length ? '' : 'primary', desc: many ? 'None of yours is replaced.' : 'Yours stays as it is.' });
+      if (up.length < v.length) options.push({ v: 'pack', label: many ? 'Use the pack\'s versions' : 'Use the pack\'s version', desc: 'Also where the pack has an older version than yours.' });
+      if (many) options.push({ v: 'picked', label: 'Only the ticked mods', desc: 'The ticked mods above get the pack\'s version; the others keep yours.' });
+    }
+    const r = await choose({ title: pl.name ? `Get the modpack ${pl.name}?` : 'Get this modpack?', body, options });
+    if (!r) return;
+    const use = r.v === 'update' ? up.map(x => x.name) : r.v === 'pack' ? v.map(x => x.name) : r.v === 'picked' ? r.picked : [];
+    if (!nw.length && !on.length && !fw.length && !use.length) { toast('Nothing changes', 'You kept your versions and already have the rest.', 'ok', 6000); return; }
+    try {
+      await api('/api/pack', Object.assign({ op: 'apply', use }, src));
+      toast('Getting the modpack', 'Progress shows in the bar at the bottom.', '', 5000);
+      await refreshState();
+      if (S.pane && S.pane.kind === 'packs') renderPane();
+    } catch (e) { toast('Could not get the modpack', e.message, 'bad', 10000); }
+  }
+  async function packMake() {
+    const p = S.pane;
+    if (!p || p.kind !== 'packs') return;
+    try { const r = await api('/api/pack', { op: 'make', name: ($('#pack-name') || {}).value || '' }); p.code = r.code; p.count = r.count; renderPane(); }
+    catch (e) { toast('Could not make a code', e.message, 'bad', 8000); }
+  }
+  async function packCopy() {
+    const t = $('#pack-out');
+    if (!t) return;
+    try { await navigator.clipboard.writeText(t.value); toast('Code copied', 'Your friend pastes it in cpmods: Downloads, Modpacks.', 'ok', 5000); }
+    catch (e) { t.focus(); t.select(); toast('Press Ctrl+C to copy', 'The code is selected.', '', 5000); }
+  }
+
+  // groups of mod names in a "what changes" list (restore points, profiles, modpacks)
   const planGrp = (title, items, cls) => items.length ? `<div class="bk-grp"><b class="${cls || ''}">${title}</b><div class="mchips">${items.map(t => `<span class="mchip sm static">${h(t)}</span>`).join('')}</div></div>` : '';
 
   // ---------- backups: restore points, save copies, mod settings ----------
@@ -2824,7 +2887,7 @@
     'b-compat': t => { S.b.compat = t.dataset.v; savePrefs(); document.querySelectorAll('[data-act="b-compat"]').forEach(b => b.classList.toggle('on', b.dataset.v === S.b.compat)); loadBrowse(true); },
     'lib-filter': t => { S.lib.filter = t.dataset.v; renderLibBody(); },
     'lib-updates': () => checkUpdates(),
-    'lib-more': t => openMenu(t, [{ label: 'Key bindings', act: 'tool', data: { tool: 'keys' }, icon: 'key' }, { label: 'Find existing mods', act: 'tool', data: { tool: 'discover' }, icon: 'scan' }, { label: 'Check game logs', act: 'tool', data: { tool: 'gamelog' }, icon: 'info' }, { label: 'Update frameworks', act: 'fw-sync', icon: 'refresh' }, { label: 'Share my mod list', act: 'modlist-export', icon: 'dl' }, '-', { label: 'Open game folder', act: 'sys', data: { op: 'folder' }, icon: 'folder' }]),
+    'lib-more': t => openMenu(t, [{ label: 'Key bindings', act: 'tool', data: { tool: 'keys' }, icon: 'key' }, { label: 'Find existing mods', act: 'tool', data: { tool: 'discover' }, icon: 'scan' }, { label: 'Check game logs', act: 'tool', data: { tool: 'gamelog' }, icon: 'info' }, { label: 'Update frameworks', act: 'fw-sync', icon: 'refresh' }, { label: 'Modpacks: share or get mods', act: 'tool', data: { tool: 'packs' }, icon: 'collections' }, '-', { label: 'Open game folder', act: 'sys', data: { op: 'folder' }, icon: 'folder' }]),
     'map-loc': t => { const o = S.lib.mapOpen, k = t.dataset.k; if (o.has(k)) o.delete(k); else o.add(k); renderLibList(); },
     'map-all': () => { const o = S.lib.mapOpen, ks = [...document.querySelectorAll('[data-act="map-loc"]')].map(b => b.dataset.k), all = ks.every(k => o.has(k)); ks.forEach(k => { if (all) o.delete(k); else o.add(k); }); renderLibList(); },
     'local-files': t => { const p = S.pane; if (!p) return; const fs = p.filesShown = p.filesShown || {}, n = t.dataset.name, cur = n in fs ? fs[n] : p.kind === 'files'; fs[n] = !cur; renderPane(); },
@@ -2846,6 +2909,9 @@
     'prof-update': t => profSave(t.dataset.name, true),
     'prof-apply': t => profApply(t.dataset.name),
     'prof-del': t => profDelete(t.dataset.name),
+    'pack-check': () => { const c = (($('#pack-code') || {}).value || '').trim(); if (c) packFlow({ code: c }); else toast('Paste a code first', 'It starts with CPMODS.', 'warn', 4000); },
+    'pack-make': () => packMake(),
+    'pack-copy': () => packCopy(),
     'disk-refresh': () => { S.disk = null; const el = $('#disk-now'); if (el) el.innerHTML = diskHtml(); loadDisk(); },
     'row-menu': t => {
       const m = findItem(t.dataset.name);
@@ -2994,6 +3060,7 @@
     else if (t.id === 'col-q' && S.pane && S.pane.kind === 'col') { S.pane.q = t.value; const box = $('#colrows'); if (box) box.innerHTML = colRowsHtml(S.pane, colRows(S.pane.data)); }
     else if (t.id === 'v-name' && S.dl.variant) S.dl.variant.name = t.value;
     else if (t.id === 'keys-q' && S.pane && S.pane.kind === 'keys') { S.pane.q = t.value; const box = $('#keyrows'); if (box) box.innerHTML = keyRowsHtml(S.pane); }
+    else if (S.pane && S.pane.kind === 'packs' && (t.id === 'pack-code' || t.id === 'pack-name')) S.pane[t.id === 'pack-code' ? 'input' : 'name'] = t.value;
   });
   document.addEventListener('change', ev => {
     const t = ev.target, d = t.dataset;
@@ -3127,6 +3194,7 @@
         if (['restore', 'saves', 'vanilla'].includes(j.kind)) reloadBackups();
         if (j.kind === 'cleanup' || (j.kind === 'saves' && $('#disk-now'))) loadDisk();
         if (j.kind === 'profile') reloadProfiles();
+        if (j.kind === 'pack' && S.pane && S.pane.kind === 'packs') renderPane();
       }
     }
     S.jobsSeen = next;

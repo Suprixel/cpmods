@@ -204,6 +204,47 @@ function Invoke-Profile([string]$Name, $Job) {
 }
 #endregion
 
+#region modpacks: gets the mods of a code or mod list. A restore point and a mod settings backup come first;
+# $UsePack names your mods that take the pack's version (the others keep yours). Downloads go through the queue
+# (-Start opens its first Nexus page).
+function Invoke-ModPack($Pack, [string[]]$UsePack, $Job, [switch]$Start) {
+    Assert-GameReady
+    if (Get-BisectState) { throw 'Troubleshooting is running: finish it first, then get the modpack' }
+    $plan = Get-PackPlan $Pack
+    $label = "Before the modpack $(if ($Pack.name) { $Pack.name } else { 'from a code' })"
+    [void](Save-RestorePoint 'manual' $label)
+    [void](Backup-ModSettings 'manual' $label)
+    $notes = [Collections.Generic.List[string]]::new()
+    foreach ($fw in @(Get-Frameworks | Where-Object { $plan.frameworks -contains $_.name })) {
+        if ($Job) { $Job.phase = "installing $($fw.name)" }
+        try { [void](Install-GitHubFramework $fw) } catch { $notes.Add("$($fw.name) not installed: $($_.Exception.Message)") }
+    }
+    # your mods that are off come back on, also the ones whose version you keep
+    $on = 0
+    foreach ($n in @(@($plan.turnOn) + @($plan.versions | Where-Object { -not $_.on -and $UsePack -notcontains $_.name } | ForEach-Object { $_.name }))) {
+        if ($Job) { $Job.phase = "turning on $n" }
+        try {
+            $r = Enable-InstalledMod -Name $n -Ask:(Test-AskOverwrite)
+            if (-not $r.conflict) { $on++; continue }
+            $d = (Get-State).disabled | Where-Object { $_.name -eq $n } | Select-Object -First 1
+            Add-Deferred 'pending' $d.archive (Copy-Meta $d) '' $r.conflict
+            $notes.Add("$n waits for your choice")
+        }
+        catch { $notes.Add("$n not turned on: $($_.Exception.Message)") }
+    }
+    $q = Add-QueueItems (@($plan.new) + @($plan.versions | Where-Object { $UsePack -contains $_.name })) "Modpack$(if ($Pack.name) { ": $($Pack.name)" })"
+    $msg = "$($q.added) download(s) queued"
+    if ($q.added -and $Start -and (Open-NextQueue)) { $msg += ', the first Nexus page is open' }
+    if ($on) { $msg += "; $on mod(s) turned back on" }
+    if ($plan.frameworks.Count) { $msg += "; frameworks: $($plan.frameworks -join ', ')" }
+    if ($plan.gone.Count) { $msg += "; $($plan.gone.Count) no longer on Nexus" }
+    $msg += ". Restore point: $label"
+    if ($notes.Count) { $msg += ". Problems: $($notes -join '; ')" }
+    Write-Note $msg
+    $msg
+}
+#endregion
+
 #region save backups: copies of the newest saves (never moved), before launches with a changed mod setup
 function Get-SavesBackupDir { Get-SafetyDir 'saves' }
 function Get-SaveBackups {

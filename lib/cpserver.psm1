@@ -110,6 +110,11 @@ Use-Lock { Invoke-StorageCleanup ([bool]$P.old) }
 param($Job, $P, $Shared)
 Use-Lock { Invoke-Profile "$($P.name)" $Job }
 '@
+    pack        = @'
+param($Job, $P, $Shared)
+try { Use-Lock { Invoke-ModPack $P.pack @($P.use) $Job -Start } }
+finally { $Shared.cache.Remove('fwupdates') }
+'@
 }
 
 function Send-Bytes($Ctx, [byte[]]$Bytes, [string]$Type, [int]$Code = 200) {
@@ -513,6 +518,18 @@ function Invoke-CpRequest {
                 Send-Json $Ctx @{ ok = $true; job = $j.id }
             }
             'GET /api/modlist' { Send-Json $Ctx (Export-ModList) }
+            'POST /api/pack' {
+                switch ("$($b.op)") {
+                    'make' { Send-Json $Ctx (ConvertTo-PackCode "$($b.name)") }
+                    'plan' { Send-Json $Ctx (Get-PackPlan (Read-ModPack "$($b.code)" $b.list)) }
+                    'apply' {
+                        $pk = Read-ModPack "$($b.code)" $b.list
+                        $j = Start-CpJob $Shared 'pack' "Getting the modpack$(if ($pk.name) { " $($pk.name)" })" @{ pack = $pk; use = @($b.use | ForEach-Object { "$_" }) }
+                        Send-Json $Ctx @{ ok = $true; job = $j.id }
+                    }
+                    default { throw "Unknown op $($b.op)" }
+                }
+            }
             'GET /api/discover' { Send-Json $Ctx (Find-ExistingMods) }
             'GET /api/log' {
                 $lines = @(Get-Content -LiteralPath (Get-CpPaths).log -Tail 200 -ErrorAction SilentlyContinue)

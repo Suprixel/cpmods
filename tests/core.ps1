@@ -326,6 +326,85 @@ try {
     $err = try { Save-UrlToFile "http://127.0.0.1:$port/f" $out $sj; '' } catch { $_.Exception.Message }
     Check ($err -eq 'Cancelled' -and $sw.Elapsed.TotalSeconds -lt 10 -and $sj.done -eq 10 -and -not (Test-Path $out) -and -not (Test-Path "$out.part")) "T27 stops on Cancel and leaves no file ($err, $([int]$sw.Elapsed.TotalSeconds) s)"
     $srv.Stop(); $srv.Dispose(); $tl.Stop()
+
+    Write-Host '--- T28: modpack code: short, safe to paste, refused when damaged; plan from Nexus data; update or keep; backups first'
+    $nx = { param($n, $mid, $fid, $v, $z) Install-ModArchive $z ([ordered]@{ name = $n; version = $v; source = "nexus:$mid/$fid"; modId = $mid; fileId = $fid; fileName = "$n main" }) | Out-Null }
+    & $nx 'PackSame' 9001 1 '1.0' (New-TestMod 'PackSame' @{ 'archive\pc\mod\psame.archive' = 's' })
+    & $nx 'PackOld' 9002 20 '1.0' (New-TestMod 'PackOld' @{ 'archive\pc\mod\pold.archive' = 'o' })
+    & $nx 'PackKeep' 9003 30 '1.0' (New-TestMod 'PackKeep' @{ 'archive\pc\mod\pkeep.archive' = 'k' })
+    & $nx 'PackOff' 9004 40 '1.0' (New-TestMod 'PackOff' @{ 'archive\pc\mod\poff.archive' = 'f' })
+    Disable-InstalledMod 'PackOff'
+    $made = ConvertTo-PackCode 'Test pack'
+    $back = Read-ModPack $made.code
+    Check ($made.code -cmatch '^CPMODS[0-9A-Za-z]+$' -and $back.name -eq 'Test pack' -and $back.game -eq "$((Get-GameState).version)" -and (@($back.mods | ForEach-Object { "$($_.modId)/$($_.fileId)" }) -join ',') -eq '9001/1,9002/20,9003/30') "T28 code round trip: $($made.code)"
+    $big = @(1..125 | ForEach-Object { [ordered]@{ modId = $_ * 299; fileId = 30000 + $_ * 1200; sub = $(if ($_ -eq 7) { 'Variant B\files' } else { $null }) } })
+    $bc = (ConvertTo-PackCode 'Big' $big).code; $bb = Read-ModPack $bc
+    Check ($bc.Length -lt 1000 -and @($bb.mods).Count -eq 125 -and $bb.mods[6].sub -eq 'Variant B\files' -and $bb.mods[124].fileId -eq 180000) "T28 125 mods fit in a chat message: $($bc.Length) characters"
+    Check (@((Read-ModPack "here is my pack: $($made.code) have fun").mods).Count -eq 3) 'T28 the code is found inside a pasted message'
+    Check (@((Read-ModPack (($made.code -split '(.{20})' | Where-Object { $_ }) -join "`r`n")).mods).Count -eq 3) 'T28 a code wrapped over lines still reads'
+    $typo = $made.code.ToCharArray(); $typo[12] = $(if ($typo[12] -ceq 'a') { 'b' } else { 'a' })
+    foreach ($bad in @{ c = 'hello'; m = 'No modpack code*' }, @{ c = [string]::new($typo); m = '*damaged or cut short*' }, @{ c = $made.code.Substring(0, $made.code.Length - 5); m = '*damaged or cut short*' }) {
+        $err = try { [void](Read-ModPack $bad.c); '' } catch { $_.Exception.Message }
+        Check ($err -like $bad.m) "T28 refused ($($bad.m)): $err"
+    }
+    $hp = Read-ModPack '' @{ format = 'cpmods-modlist'; name = 'x' * 80; mods = @(
+            @{ name = '..'; modId = 9100; fileId = 100; sub = '..\..\Windows' }, @{ name = 'Fine'; modId = 9101; fileId = 101; sub = 'C:\x' },
+            @{ name = 'NoIds'; modId = 'abc'; fileId = 5 }, @{ name = 'Dup'; modId = 9101; fileId = 101 }, 'not an object') }
+    Check (@($hp.mods).Count -eq 2 -and -not $hp.mods[0].sub -and -not $hp.mods[1].sub -and $hp.name.Length -eq 60) "T28 hostile list cleaned: $(ConvertTo-Json $hp -Compress -Depth 4)"
+    Check ((Get-SafeName '..') -eq '_..' -and (Get-SafeName ' . ') -eq '_ . ' -and (Get-SafeName 'Mod 1.2') -eq 'Mod 1.2') 'T28 a name of dots never becomes a parent folder'
+    $err = try { Install-ModArchive $zD ([ordered]@{ name = 'Escape'; version = '1'; source = 'manual'; sub = '..\..' }) | Out-Null; '' } catch { $_.Exception.Message }
+    Check ($err -like 'Invalid folder*') "T28 install refuses a folder outside the archive: $err"
+
+    # Nexus stand-in: mod name and files per mod id (a code holds only ids)
+    $fake = @{
+        9001 = 'PackSame', @(@{ fileId = 1; name = 'PackSame main'; version = '1.0'; category = 'MAIN' })
+        9002 = 'PackOld', @(@{ fileId = 20; name = 'PackOld main'; version = '1.0'; category = 'OLD_VERSION' }, @{ fileId = 21; name = 'PackOld main'; version = '2.0'; category = 'MAIN' })
+        9003 = 'Keep renamed', @(@{ fileId = 29; name = 'PackKeep main 0.9'; version = '0.9'; category = 'OLD_VERSION' }, @{ fileId = 30; name = 'PackKeep main'; version = '1.0'; category = 'MAIN' })
+        9004 = 'PackOff', @(@{ fileId = 40; name = 'PackOff main'; version = '1.0'; category = 'MAIN' })
+        9005 = 'Brand new', @(@{ fileId = 50; name = 'Brand new'; version = '3.1'; category = 'MAIN' })
+        9006 = 'ModD', @(@{ fileId = 60; name = 'Other ModD'; version = '1.0'; category = 'MAIN' })
+        9007 = 'Was removed', @(@{ fileId = 70; name = 'x'; version = '1'; category = 'REMOVED' })
+        9008 = 'Twin', @(@{ fileId = 80; name = 'Twin A'; version = '1'; category = 'MAIN' }, @{ fileId = 81; name = 'Twin B'; version = '1'; category = 'OPTIONAL' })
+    }
+    $origGql = & (Get-Module cpmods) { ${function:Invoke-NexusGql} }
+    & (Get-Module cpmods) {
+        param($f) $script:FakeNx = $f
+        function script:Invoke-NexusGql([string]$Query) {
+            $d = @{ legacyModsByDomain = @{ nodes = @(foreach ($m in [regex]::Matches($Query, 'modId: (\d+)\}')) { $x = $script:FakeNx[[int]$m.Groups[1].Value]; if ($x) { @{ modId = [int]$m.Groups[1].Value; name = $x[0] } } }) } }
+            foreach ($m in [regex]::Matches($Query, 'm(\d+): modFiles')) { $x = $script:FakeNx[[int]$m.Groups[1].Value]; $d["m$($m.Groups[1].Value)"] = $(if ($x) { $x[1] } else { @() }) }
+            $d
+        }
+    } $fake
+    try {
+        $code = (ConvertTo-PackCode 'Friends' @(@{ modId = 9001; fileId = 1 }, @{ modId = 9002; fileId = 21 }, @{ modId = 9003; fileId = 29 }, @{ modId = 9004; fileId = 40 }, @{ modId = 9005; fileId = 50 },
+                @{ modId = 9006; fileId = 60 }, @{ modId = 9007; fileId = 70 }, @{ modId = 9008; fileId = 80 }, @{ modId = 9008; fileId = 81 }, @{ modId = 9009; fileId = 90 })).code
+        '[{"name":"FwX","repo":"none/none","asset":"x"}]' | Set-Content "$Sb\frameworks.json"
+        $pl = Get-PackPlan (Read-ModPack $code)
+        '[]' | Set-Content "$Sb\frameworks.json"
+        $vs = { param($n) $pl.versions | Where-Object name -eq $n }
+        Check ((@($pl.have) -join ',') -eq 'PackSame' -and (@($pl.turnOn) -join ',') -eq 'PackOff' -and (@($pl.versions | ForEach-Object name) -join ',') -eq 'PackOld,PackKeep' -and (@($pl.frameworks) -join ',') -eq 'FwX') "T28 plan: have, turn on, other versions, frameworks: $(ConvertTo-Json $pl -Compress -Depth 4)"
+        Check ((& $vs 'PackOld').newer -and -not (& $vs 'PackOld').older -and (& $vs 'PackOld').pack -eq '2.0' -and (& $vs 'PackKeep').older -and -not (& $vs 'PackKeep').newer) 'T28 plan: the pack has PackOld newer, PackKeep older (matched by its file name)'
+        Check ((@($pl.new | ForEach-Object name) -join ',') -eq 'Brand new,ModD (9006),Twin - Twin A,Twin - Twin B' -and ($pl.new | Where-Object fileId -eq 50).version -eq '3.1') "T28 plan: new mods named from Nexus, a clashing name kept apart, two files of one mod: $(($pl.new | ForEach-Object name) -join ', ')"
+        Check ((@($pl.gone) -join ',') -eq 'Was removed (file 70),Nexus mod 9009') "T28 plan: removed and unknown files are skipped: $(@($pl.gone) -join ', ')"
+        # "Update my mods": the pack's version only where it is newer
+        $pts = @(Get-RestorePoints).Count
+        [void](Invoke-ModPack (Read-ModPack $code) @(@($pl.versions | Where-Object newer | ForEach-Object name)))
+        $q = @(Get-Queue | Where-Object { -not $_.done }); $st = Get-State
+        Check (@(Get-RestorePoints)[0].label -eq 'Before the modpack Friends' -and @(Get-RestorePoints).Count -eq $pts + 1) 'T28 restore point made first'
+        Check (@(Get-SettingsBackups | Where-Object { $_.reason -eq 'Before the modpack Friends' }).Count -eq 1) 'T28 mod settings backup made first'
+        Check ((@($q | ForEach-Object { "$($_.fileId)=$($_.name)" }) -join ',') -eq '50=Brand new,60=ModD (9006),80=Twin - Twin A,81=Twin - Twin B,21=PackOld') "T28 queue: new mods, then PackOld updated under its name; PackKeep not downgraded: $(($q | ForEach-Object { "$($_.fileId)=$($_.name)" }) -join ', ')"
+        Check (($st.mods | Where-Object name -eq 'PackOff') -and ($st.mods | Where-Object name -eq 'PackKeep').fileId -eq 30) 'T28 PackOff turned back on, PackKeep unchanged'
+    }
+    finally { & (Get-Module cpmods) { param($f) Set-Item function:script:Invoke-NexusGql $f } $origGql }
+    & $nx 'PackOld' 9002 21 '2.0' (New-TestMod 'PackOld2' @{ 'archive\pc\mod\pold.archive' = 'o2' })
+    $po = (Get-State).mods | Where-Object name -eq 'PackOld'
+    Check ($po.fileId -eq 21 -and @($po.older).Count -eq 1 -and @((Get-State).mods | Where-Object modId -eq 9002).Count -eq 1 -and (& $cont 'archive\pc\mod\pold.archive') -eq 'o2') 'T28 the pack version replaced yours in place; your download is kept'
+    $rp = Get-RestorePlan (@(Get-RestorePoints | Where-Object label -eq 'Before the modpack Friends')[0].id)
+    Check (@($rp.version | Where-Object { $_.name -eq 'PackOld' -and $_.to -eq '1.0' }).Count -eq 1) 'T28 the restore point brings your version back'
+    Disable-InstalledMod 'PackKeep'
+    & $nx 'PackKeep' 9003 31 '3.0' (New-TestMod 'PackKeep3' @{ 'archive\pc\mod\pkeep.archive' = 'k3' })
+    $pk = (Get-State).mods | Where-Object name -eq 'PackKeep'
+    Check ($pk.fileId -eq 31 -and @($pk.older) -contains "$Sb\src\PackKeep.zip" -and -not ((Get-State).disabled | Where-Object name -eq 'PackKeep')) 'T28 replacing a turned-off mod keeps its download for going back'
 }
 catch { $script:fails++; Write-Host "FAIL (stopped): $($_.Exception.Message)" -ForegroundColor Red }
 finally {

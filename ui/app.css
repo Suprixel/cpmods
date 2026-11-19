@@ -140,7 +140,8 @@ body.resizing .page, body.resizing .pane-scroll { pointer-events: none; }
 .toolbar { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; }
 input[type=search], input[type=text], input[type=date], select { height: 36px; padding: 0 11px; border: 1px solid var(--line2); border-radius: var(--r-sm); background: var(--surface); outline: none; }
 select { cursor: pointer; padding-right: 8px; }
-input:focus, select:focus { border-color: var(--accent-line); box-shadow: 0 0 0 3px rgba(var(--accent-rgb), .12); }
+textarea.pack-code { display: block; width: 100%; min-height: 84px; padding: 8px 11px; border: 1px solid var(--line2); border-radius: var(--r-sm); background: var(--surface); color: var(--text); font: 12px/1.45 "Cascadia Mono", Consolas, monospace; word-break: break-all; resize: vertical; outline: none; }
+input:focus, select:focus, textarea:focus { border-color: var(--accent-line); box-shadow: 0 0 0 3px rgba(var(--accent-rgb), .12); }
 /* wraps instead of pushing a narrow page sideways */
 .seg { display: inline-flex; flex-wrap: wrap; max-width: 100%; padding: 3px; gap: 2px; border: 1px solid var(--line2); border-radius: 10px; background: var(--surface); }
 .seg button { display: inline-flex; align-items: center; gap: 6px; height: 28px; padding: 0 11px; border: 0; border-radius: 7px; background: none; color: var(--text2); font-size: 13px; font-weight: 600; cursor: pointer; white-space: nowrap; }
