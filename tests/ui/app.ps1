@@ -23,18 +23,30 @@ try {
     # the hidden test window counts as a background tab (20 s polls): make every page load see itself as visible
     [void](Invoke-Cdp 'Page.addScriptToEvaluateOnNewDocument' @{ source = 'Object.defineProperty(document, "hidden", { get: () => false }); Object.defineProperty(document, "visibilityState", { get: () => "visible" });' })
     [void](Invoke-Cdp 'Page.navigate' @{ url = 'http://localhost:7078/#/settings' })
-    Check ([bool](WaitJs 'document.querySelectorAll(".sx").length === 7')) 'settings: 7 sections (launch and backups moved to the Game page)'
+    Check ([bool](WaitJs 'document.querySelectorAll(".sx").length === 8')) 'settings: 8 sections (launch and backups moved to the Game page, the mouse has its own)'
     Check ((Js 'document.querySelectorAll(".sx.open").length') -eq 1) 'settings: only Downloads open at first'
     Check ((Js 'document.querySelector("#sx-downloads .sx-t span").textContent') -like '*asks when two mods share a file*') 'settings: closed header shows values'
     [void](Click '[data-act="sx"][data-k="perf"]')
     Check ([bool](WaitJs '/Server/.test((document.getElementById("perf-now") || {}).innerText || "")' 12000)) 'settings: performance numbers load when opened'
-    # the mouse answer depends on the PC (real hardware, read only): only its arrival is checked
-    Check ([bool](WaitJs '!!document.querySelector("#mouse-set select[data-perf=mouse]") && !document.querySelector("#mouse-set .spin")' 12000)) "settings: mouse profile row and its status load ($(Js 'document.querySelector("#mouse-set .perf-now").innerText'))"
-    [void](Js '(() => { const e = document.querySelector("#mouse-set select"); e.value = e.options[e.options.length - 1].value; e.dispatchEvent(new Event("change", { bubbles: true })); })()'); Start-Sleep -Milliseconds 1200
-    $mp = (Get-Content "$Sb\state\ui.json" -Raw | ConvertFrom-Json).perf.mouse
-    Check ($mp -is [long] -and $mp -ge 1) "settings: the mouse profile saves as a number ($mp)"
-    [void](Js '(() => { const e = document.querySelector("#mouse-set select"); e.value = "0"; e.dispatchEvent(new Event("change", { bubbles: true })); })()'); Start-Sleep -Milliseconds 1200
-    Check ((Get-Content "$Sb\state\ui.json" -Raw | ConvertFrom-Json).perf.mouse -eq 0) 'settings: mouse profile back to Off'
+    # the Mouse section; the mouse answer depends on the PC (real hardware, read only): only its arrival is checked
+    [void](Click '[data-act="sx"][data-k="mouse"]')
+    Check ([bool](WaitJs '!!document.querySelector("#mouse-set input[data-perf=mouseOn]") && !document.querySelector("#mouse-set .spin")' 12000)) "settings: Mouse section with its switch and status ($(Js 'document.querySelector("#mouse-set .perf-now").innerText'))"
+    $setMouse = { param($js) [void](Js $js); Start-Sleep -Milliseconds 1200; (Get-Content "$Sb\state\ui.json" -Raw | ConvertFrom-Json).perf }
+    $pf = & $setMouse '(() => { const e = document.querySelector("#mouse-set input[data-perf=mouseOn]"); e.checked = true; e.dispatchEvent(new Event("change", { bubbles: true })); })()'
+    Check ($pf.mouse -is [long] -and $pf.mouse -ge 1 -and $pf.mouseLast -eq $pf.mouse) "settings: mouse switch on saves the profile shown ($($pf.mouse))"
+    $pf = & $setMouse '(() => { const e = document.querySelector("#mouse-set select"); e.value = e.options[e.options.length - 1].value; e.dispatchEvent(new Event("change", { bubbles: true })); })()'
+    $last = $pf.mouse
+    Check ($last -ge 1 -and $pf.mouseLast -eq $last) "settings: another profile while on ($last)"
+    $pf = & $setMouse '(() => { const e = document.querySelector("#mouse-set input[data-perf=mouseOn]"); e.checked = false; e.dispatchEvent(new Event("change", { bubbles: true })); })()'
+    Check ($pf.mouse -eq 0 -and $pf.mouseLast -eq $last -and (Js 'document.querySelector("#mouse-set select").disabled') -and "$(Js 'document.querySelector("#mouse-set select").value')" -eq "$last") 'settings: mouse off keeps the chosen profile for next time'
+    # settings search: typing filters every section; a heading shows its group; nothing found says so
+    $find = { param($q) [void](Js "(() => { const e = document.getElementById('set-q'); e.focus(); e.value = '$q'; e.dispatchEvent(new Event('input', { bubbles: true })); })()"); Start-Sleep -Milliseconds 300; "$(Js '[...document.querySelectorAll(".sx")].filter(s => !s.hidden).map(s => s.id).join()')" }
+    Check ((& $find 'polling') -eq 'sx-mouse') 'settings search: "polling" finds the Mouse section only'
+    Check ((& $find 'browser') -eq 'sx-downloads,sx-perf' -and (Js 'document.querySelectorAll("#sx-perf .setting:not([hidden])").length') -eq 1) 'settings search: "browser" finds the links row and the app window row'
+    Check ((& $find 'disk') -eq 'sx-perf' -and -not (Js 'document.getElementById("disk-now").hidden') -and (Js 'document.getElementById("perf-now").hidden')) 'settings search: a matching heading shows its group only'
+    Check (-not (& $find 'zzqx') -and -not (Js 'document.getElementById("set-none").hidden')) 'settings search: nothing found says so'
+    Check (((& $find '') -split ',').Count -eq 8 -and (Js 'document.activeElement.id') -eq 'set-q') 'settings search: clearing shows every section again, the box keeps focus'
+    [void](Js 'document.activeElement.blur()')
     Check ((Js 'document.querySelectorAll(".perf-est").length') -eq 0) 'settings: memory numbers hidden by default'
     [void](Click '[data-act="perf-info"]')
     Check ((Js 'document.querySelectorAll(".perf-est").length') -gt 3) 'settings: memory numbers on request'
@@ -44,7 +56,7 @@ try {
     for ($i = 0; $i -lt 20 -and -not (Api '/api/state').settings.askOverwrite; $i++) { [void](Js '(() => { const e = document.querySelector("[data-setting=askOverwrite]"); if (!e.checked) { e.checked = true; e.dispatchEvent(new Event("change", { bubbles: true })); } })()'); Start-Sleep -Milliseconds 500 }
     Check ((Api '/api/state').settings.askOverwrite -eq $true) 'settings: ask switch back on'
     [void](Click '[data-act="sx-all"]'); Start-Sleep -Milliseconds 300
-    Check ((Js 'document.querySelectorAll(".sx.open").length') -eq 7) 'settings: expand all'
+    Check ((Js 'document.querySelectorAll(".sx.open").length') -eq 8) 'settings: expand all'
     Shot 'ui-settings.jpg'
     [void](Click '[data-act="sx-all"]'); Start-Sleep -Milliseconds 300
     Check ((Js 'document.querySelectorAll(".sx.open").length') -eq 0) 'settings: collapse all'

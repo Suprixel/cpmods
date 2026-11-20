@@ -77,7 +77,7 @@ try {
 
     # Settings: 7 sections, backgrounds (White, Custom), disk space and cleanup
     [void](Invoke-Cdp 'Page.navigate' @{ url = 'http://localhost:7078/#/settings' })
-    Check ([bool](WaitJs 'document.querySelectorAll(".sx").length === 7 && !!document.querySelector(".sx-note [data-page=game]")')) 'settings: 7 sections and a pointer to the Game page'
+    Check ([bool](WaitJs 'document.querySelectorAll(".sx").length === 8 && !!document.querySelector(".sx-note [data-page=game]")')) 'settings: 8 sections and a pointer to the Game page'
     [void](Click '[data-act="sx"][data-k="look"]'); [void](WaitJs 'document.querySelectorAll("[data-bg-opt]").length === 6')
     Check ((Js 'document.querySelectorAll("[data-bg-opt]").length') -eq 6) 'appearance: 6 backgrounds'
     [void](Js '(() => { const i = document.querySelector("input[name=bg][value=white]"); i.checked = true; i.dispatchEvent(new Event("change", { bubbles: true })); })()'); Start-Sleep -Milliseconds 900

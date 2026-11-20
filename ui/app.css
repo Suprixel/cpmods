@@ -140,6 +140,7 @@ body.resizing .page, body.resizing .pane-scroll { pointer-events: none; }
 .toolbar { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; }
 input[type=search], input[type=text], input[type=date], select { height: 36px; padding: 0 11px; border: 1px solid var(--line2); border-radius: var(--r-sm); background: var(--surface); outline: none; }
 select { cursor: pointer; padding-right: 8px; }
+select:disabled { opacity: .45; cursor: default; }
 textarea.pack-code { display: block; width: 100%; min-height: 84px; padding: 8px 11px; border: 1px solid var(--line2); border-radius: var(--r-sm); background: var(--surface); color: var(--text); font: 12px/1.45 "Cascadia Mono", Consolas, monospace; overflow-wrap: anywhere; resize: vertical; outline: none; }
 input:focus, select:focus, textarea:focus { border-color: var(--accent-line); box-shadow: 0 0 0 3px rgba(var(--accent-rgb), .12); }
 /* wraps instead of pushing a narrow page sideways */
@@ -358,6 +359,7 @@ a.gal-main { cursor: pointer; }
 .setting-text { min-width: 0; }
 .setting-text b { display: block; font-weight: 600; }
 .setting-text span { color: var(--text3); font-size: 12.5px; }
+.mouse-ctl { display: flex; align-items: center; gap: 12px; flex-shrink: 0; }
 .progress { height: 6px; margin-top: 8px; border-radius: 4px; background: var(--hover); overflow: hidden; }
 .progress > div { height: 100%; background: var(--accent-hbar); transition: width .4s; }
 .progress.ind > div { width: 35% !important; animation: ind 1.2s ease-in-out infinite; }

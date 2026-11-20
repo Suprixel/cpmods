@@ -105,6 +105,7 @@
     stop: '<rect x="6.5" y="6.5" width="11" height="11" rx="2"/>',
     key2: '<circle cx="8" cy="15" r="4"/><path d="m11 12 8-8M16 7l2.5 2.5M14 9l2 2"/>',
     gauge: '<path d="M4.2 17a8.5 8.5 0 1 1 15.6 0"/><path d="m12 14 4-5"/><circle cx="12" cy="14.2" r="1.3"/>',
+    mouse: '<rect x="6" y="3" width="12" height="18" rx="6"/><path d="M12 7v4"/>',
     palette: '<path d="M12 3.5a8.5 8.5 0 1 0 0 17c1.2 0 1.9-.8 1.9-1.8 0-1.3-1.2-1.6-1.2-2.9 0-1 .8-1.6 1.7-1.6h2.4a3.7 3.7 0 0 0 3.7-3.7c0-3.9-3.8-7-8.5-7z"/><circle cx="8" cy="11" r="1"/><circle cx="11" cy="7.4" r="1"/><circle cx="15.4" cy="8.6" r="1"/>',
     share: '<circle cx="6" cy="12" r="2.4"/><circle cx="17.5" cy="6" r="2.4"/><circle cx="17.5" cy="18" r="2.4"/><path d="m8.2 10.8 7.1-3.6M8.2 13.2l7.1 3.6"/>',
     save: '<path d="M5 4h11.5L20 7.5V20H5z"/><path d="M8.5 4v4.5h6.5V4M8.5 20v-6h7v6"/>',
@@ -1564,17 +1565,20 @@
     const el = $('#perf-now');
     if (el) el.innerHTML = perfNowHtml();
   }
-  // Logitech onboard profile while playing: the server switches when the game starts and puts the previous one back after
+  // Logitech onboard profile while playing: the server switches when the game starts and puts the previous one back after.
+  // perf.mouse is what the server reads (0 = off); perf.mouseLast keeps the chosen profile while it is off
+  const mouseSuggest = () => { const m = S.mouse, ps = m && m.found ? arr(m.profiles) : [], p = ps.find(x => x.on && x.n !== m.current) || ps[0]; return p ? p.n : 2; };
   function mouseHtml() {
-    const P = perf(), m = S.mouse, found = m && m.found ? m.profiles : null;
-    const list = [[0, 'Off']].concat((found || [1, 2, 3, 4, 5].map(n => ({ n, on: true }))).map(p => [p.n, `Profile ${p.n}${p.hz ? ` · ${p.hz} Hz` : ''}${p.on ? '' : ' (off on the mouse)'}`]));
-    if (P.mouse && !list.some(x => x[0] === P.mouse)) list.push([P.mouse, `Profile ${P.mouse} (not on this mouse)`]);
+    const P = perf(), m = S.mouse, found = m && m.found ? arr(m.profiles) : null, on = P.mouse > 0, pick = P.mouse || P.mouseLast || mouseSuggest();
+    const list = (found || [1, 2, 3, 4, 5].map(n => ({ n, on: true }))).map(p => [p.n, `Profile ${p.n}${p.hz ? ` · ${p.hz} Hz` : ''}${p.on ? '' : ' (off on the mouse)'}`]);
+    if (!list.some(x => x[0] === pick)) list.push([pick, `Profile ${pick} (not on this mouse)`]);
     const cur = found && found.find(p => p.n === m.current);
     const now = !m ? '<span class="spin"></span><span>Looking for the mouse...</span>'
       : m.error ? `<span class="dim">${h(m.error)}</span>`
         : !m.found ? '<span class="dim">No Logitech mouse with onboard profiles answered. Wired or wireless both work; a sleeping mouse wakes when moved.</span>'
           : `<span>${h(m.name || 'Logitech mouse')}: <b>profile ${m.current}</b> <span class="dim">active${cur && cur.hz ? `, ${cur.hz} Hz` : ''}</span></span>${m.onboard ? '' : '<span class="pill warn">Software mode: G HUB controls it</span>'}`;
-    return `<div class="setting"><div class="setting-text"><b>Mouse profile while playing</b><span>Logitech mice with onboard profiles (Onboard Memory Manager or G HUB). Use one with a lower polling rate if 8000 Hz drops your fps. The profile that was active comes back when the game closes.</span></div><select data-perf="mouse" aria-label="Mouse profile while playing">${opt(list, P.mouse)}</select></div>
+    return `<div class="setting"><div class="setting-text"><b>Mouse profile while playing</b><span>For Logitech mice with onboard profiles (Onboard Memory Manager or G HUB). When the game starts, cpmods switches to the profile you pick, for example one with a lower polling rate if 8000 Hz drops your fps. The profile that was active comes back when the game closes.</span></div>
+      <div class="mouse-ctl"><select data-perf="mouse" aria-label="Profile while playing"${on ? '' : ' disabled'}>${opt(list, pick)}</select><label class="switch"><input type="checkbox" data-perf="mouseOn"${on ? ' checked' : ''} aria-label="Mouse profile while playing"><span></span></label></div></div>
       <div class="perf-now">${now}<button class="link-btn small" data-act="mouse-refresh">Check again</button></div>`;
   }
   // a redraw while a lookup runs must not start another (a mouse that is off takes about 4 s to rule out)
@@ -1596,7 +1600,6 @@
       <div class="sub-label">Disk space</div><div id="disk-now">${diskHtml()}</div>
       <div class="sub-label">While the game runs</div>
       ${row('Lighter while the game runs', 'Reports page only, no pictures, slower refresh, lower priority.', 'Measured: window 167 to 43 MB, server 110 to 26 MB (Task Manager). Minimizing cpmods frees memory the same way.', sw('lean', 'Lighter while the game runs'))}
-      <div id="mouse-set">${mouseHtml()}</div>
       <div class="sub-label">Pictures</div>
       <div class="set-grid">
       ${row('Tile pictures', 'On Discover and Collections.', `About 20 on screen: large ${fmtMb(20 * PIC_MB.large)}, small ${fmtMb(20 * PIC_MB.small)}.`, sel('pics', 'Tile pictures', [['large', 'Large'], ['small', 'Small'], ['off', 'Off']]))}
@@ -1653,14 +1656,16 @@
   }
 
   // ---------- settings: one collapsible section per topic; the closed header still shows the current values ----------
+  // kw: words the settings search finds a whole section by, besides its name and what it shows
   const SECTIONS = [
-    { k: 'downloads', t: 'Downloads and installs', i: 'downloads' },
-    { k: 'look', t: 'Appearance', i: 'palette' },
-    { k: 'perf', t: 'Performance and disk space', i: 'gauge' },
-    { k: 'nexus', t: 'Nexus account', i: 'key2' },
-    { k: 'patch', t: 'Patch compatibility', i: 'refresh' },
-    { k: 'share', t: 'Share with friends', i: 'share' },
-    { k: 'app', t: 'App', i: 'gear' },
+    { k: 'downloads', t: 'Downloads and installs', i: 'downloads', kw: 'conflict overwrite' },
+    { k: 'look', t: 'Appearance', i: 'palette', kw: 'theme colour accent dark light' },
+    { k: 'perf', t: 'Performance and disk space', i: 'gauge', kw: 'ram speed images' },
+    { k: 'mouse', t: 'Mouse', i: 'mouse', kw: 'dpi' },
+    { k: 'nexus', t: 'Nexus account', i: 'key2', kw: 'login nxm' },
+    { k: 'patch', t: 'Patch compatibility', i: 'refresh', kw: 'version update' },
+    { k: 'share', t: 'Share with friends', i: 'share', kw: 'export' },
+    { k: 'app', t: 'App', i: 'gear', kw: '' },
   ];
   const setOpen = () => new Set(Array.isArray(prefs.setOpen) ? prefs.setOpen : ['downloads']);
   const srow = (title, text, ctl) => `<div class="setting"><div class="setting-text"><b>${title}</b><span>${text}</span></div>${ctl}</div>`;
@@ -1670,7 +1675,8 @@
     const parts = {
       downloads: [s.autoInstall ? 'Installs when downloaded' : 'Installs when you choose', s.askOverwrite !== false ? 'asks when two mods share a file' : 'last installed mod wins shared files', s.browser ? 'links in ' + browserName() : 'links in your default browser'],
       look: [th.name, bg.id === 'match' ? 'matching background' : bg.name.toLowerCase() + ' background', P.fx ? 'effects on' : 'effects off'],
-      perf: [P.lean ? 'Lighter while playing' : 'Same while playing', P.mouse ? `mouse profile ${P.mouse} in game` : '', `${P.pics} tile pictures`, P.window === 'browser' ? 'browser window' : 'built-in window', S.disk && S.disk.mods ? fmtSize(S.disk.mods.bytes) + ' of mods' : ''],
+      perf: [P.lean ? 'Lighter while playing' : 'Same while playing', `${P.pics} tile pictures`, P.window === 'browser' ? 'browser window' : 'built-in window', S.disk && S.disk.mods ? fmtSize(S.disk.mods.bytes) + ' of mods' : ''],
+      mouse: [P.mouse ? `Profile ${P.mouse} while playing` : 'Off'],
       nexus: [st.key ? 'API key set' : 'API key missing', st.handler ? 'download links work' : 'download links not set up'],
       patch: [`"Updated for ${s.patchLabel}" means updated since ${fmtDate(s.patchDate)}`],
       share: ['App zip, your mod list, your mod settings'],
@@ -1687,6 +1693,7 @@
       + srow('Open links in', 'Pages open in this browser and come to the front.', `<select id="s-browser" aria-label="Open links in">${opt([['', 'Windows default']].concat((st.browsers || []).map(b => [b.path, b.name])), s.browser || '')}</select>`);
     if (k === 'look') return appearanceHtml();
     if (k === 'perf') return perfHtml();
+    if (k === 'mouse') return `<div id="mouse-set">${mouseHtml()}</div>`;
     if (k === 'nexus') return srow('API key', st.key ? 'Stored encrypted for your Windows account.' : 'Downloads need it. A free Nexus account is enough.', `<span class="pill ${st.key ? 'ok' : 'warn'}">${st.key ? 'Set' : 'Missing'}</span>`)
       + `<div class="keyrow"><input type="password" id="s-key" autocomplete="off" spellcheck="false" placeholder="${st.key ? 'Paste a new key to replace it' : 'Paste your Personal API Key'}" aria-label="Nexus API key"><button class="btn sm primary" data-act="key-save">Save</button><button class="btn sm ghost" data-act="open-url" data-url="https://next.nexusmods.com/settings/api-keys" title="Opens the Nexus page with your key">${ic('ext')}Get my key</button></div>`
       + srow('Download links', '"Slow download" on Nexus hands the file to cpmods.', st.handler ? '<span class="pill ok">Working</span>' : '<button class="btn sm primary" data-act="sys" data-op="register">Fix</button>');
@@ -1702,28 +1709,64 @@
       + srow('Quit cpmods', 'Running downloads finish first.', '<button class="btn sm danger" data-act="sys" data-op="quit">Quit</button>');
   }
   function pageSettings(el) {
-    const open = setOpen(), all = SECTIONS.every(x => open.has(x.k));
+    // a search shows every section, filtered down to what matches
+    const q = (S.setQ || '').trim(), open = q ? new Set(SECTIONS.map(x => x.k)) : setOpen(), all = SECTIONS.every(x => open.has(x.k));
     el.innerHTML = `
       <header class="page-head"><div class="ph-top"><div><h1>Settings</h1><p class="sub">Changes save as soon as you make them. Click a section to open it.</p></div>
-        <div class="ph-actions"><button class="btn sm ghost" data-act="sx-all">${all ? 'Collapse all' : 'Expand all'}</button></div></div></header>
+        <div class="ph-actions"><div class="searchbar sm">${ic('search')}<input type="search" id="set-q" placeholder="Search settings   ( / )" value="${h(S.setQ || '')}" autocomplete="off" spellcheck="false" aria-label="Search settings"></div>${q ? '' : `<button class="btn sm ghost" data-act="sx-all">${all ? 'Collapse all' : 'Expand all'}</button>`}</div></div></header>
       <div class="page-body"><div class="sx-list"><div class="sx-note">${ic('game')}<span>Launch options, saves and backups, and the game folders are on the <button class="link-btn" data-act="go" data-page="game">Game page</button>.</span></div>${SECTIONS.map(x => {
       const on = open.has(x.k);
       return `<section class="sx${on ? ' open' : ''}" id="sx-${x.k}"><button class="sx-head" data-act="sx" data-k="${x.k}" aria-expanded="${on}" aria-controls="sxb-${x.k}"><span class="sx-ic">${ic(x.i)}</span><span class="sx-t"><b>${h(x.t)}</b><span>${h(sectionSummary(x.k))}</span></span><span class="sx-chev">${ic('down')}</span></button>
         <div class="sx-body" id="sxb-${x.k}"${on ? '' : ' hidden'}>${on ? sectionBody(x.k) : ''}</div></section>`;
-    }).join('')}</div></div>`;
-    // live memory numbers only while their section is open (one WMI query each time); disk space once per opening
-    if (open.has('perf')) { loadPerfNow(); if (!S.disk && !diskBusy) loadDisk(); if (!S.mouse && !mouseBusy) loadMouse(); }
+    }).join('')}<p class="dim" id="set-none" hidden>No setting matches this search.</p></div></div>`;
+    if (q) filterSettings();
+    loadShown(true);
+  }
+  // search: only the matching parts of a section show; when nothing inside matches, its name or keywords show all of it.
+  // A heading that matches shows its group, and a block that is not a setting row (key box, status line, color wheel)
+  // stays with the block before it
+  function filterSettings() {
+    const words = (S.setQ || '').toLowerCase().split(/\s+/).filter(Boolean), has = s => { s = s.toLowerCase(); return words.every(w => s.includes(w)); };
+    let any = false;
+    for (const x of SECTIONS) {
+      const sec = $('#sx-' + x.k), body = $('#sxb-' + x.k);
+      if (!sec || !body) continue;
+      const units = [...body.children].flatMap(c => c.classList.contains('set-grid') ? [...c.children] : [c]);
+      const show = whole => {
+        let head = null, headHit = false, prev = false, n = 0;
+        for (const u of units) {
+          if (u.classList.contains('sub-label')) { head = u; headHit = has(u.textContent); u.hidden = !(whole || headHit); prev = false; continue; }
+          prev = whole || headHit || has(u.textContent) || (prev && !u.classList.contains('setting'));
+          u.hidden = !prev;
+          if (prev) { n++; if (head) head.hidden = false; }
+        }
+        return n;
+      };
+      const n = show(false) || (has(`${x.t} ${x.kw}`) ? show(true) : 0);
+      body.querySelectorAll('.set-grid').forEach(g => { g.hidden = ![...g.children].some(c => !c.hidden); });
+      sec.hidden = !n;
+      any = any || n > 0;
+    }
+    $('#set-none').hidden = any;
+  }
+  // data of the sections in view: memory numbers on each full redraw (one WMI query), disk space and the mouse once per opening
+  function loadShown(fresh) {
+    const vis = k => { const s = $('#sx-' + k); return !!s && s.classList.contains('open') && !s.hidden; };
+    if (vis('perf')) { if (fresh || !S.perfNow) loadPerfNow(); if (!S.disk && !diskBusy) loadDisk(); }
+    if (vis('mouse') && !S.mouse && !mouseBusy) loadMouse();
   }
   function toggleSection(k, force) {
     const open = setOpen(), on = force != null ? force : !open.has(k);
     if (on) open.add(k); else open.delete(k);
-    // disk space is measured again each time its section opens
-    if (on && k === 'perf') { S.disk = null; S.mouse = null; }
+    // disk space and the mouse are checked again each time their section opens
+    if (on && k === 'perf') S.disk = null;
+    if (on && k === 'mouse') S.mouse = null;
     prefs.setOpen = [...open]; savePrefs();
     if (S.page === 'settings') pageSettings($('#page'));
   }
   // settings opened at one section (from Backups, the play menu...)
   function openSettings(k) {
+    S.setQ = '';
     toggleSection(k, true);
     go('settings');
     const el = $('#sx-' + k);
@@ -3157,6 +3200,12 @@
     else if (t.id === 'c-q') { S.c.q = t.value; debounce('cq', renderColResults, 150); }
     else if (t.id === 'lib-q') { S.lib.q = t.value; renderLibList(); }
     else if (t.id === 'dl-q') { S.dl.q = t.value; debounce('dlq', renderDlBody, 120); }
+    else if (t.id === 'set-q') {
+      // starting or clearing a search redraws (every section's body shows while searching); further typing only filters
+      const was = !!(S.setQ || '').trim(); S.setQ = t.value;
+      if (was !== !!t.value.trim()) { pageSettings($('#page')); const i = $('#set-q'); i.focus(); i.setSelectionRange(i.value.length, i.value.length); }
+      else if (was) { filterSettings(); loadShown(false); }
+    }
     else if (t.id === 'col-q' && S.pane && S.pane.kind === 'col') { S.pane.q = t.value; const box = $('#colrows'); if (box) box.innerHTML = colRowsHtml(S.pane, colRows(S.pane.data)); }
     else if (t.id === 'v-name' && S.dl.variant) S.dl.variant.name = t.value;
     else if (t.id === 'keys-q' && S.pane && S.pane.kind === 'keys') { S.pane.q = t.value; const box = $('#keyrows'); if (box) box.innerHTML = keyRowsHtml(S.pane); }
@@ -3185,6 +3234,12 @@
     else if (t.name === 'bg') setBg(t.value);
     else if (t.id === 'cw-l' || t.id === 'bw-l') savePrefs();
     else if (t.id === 'cw-hex' || t.id === 'bw-hex') { if (validHex(t.value)) { t.value = normHex(t.value); savePrefs(); } else { t.value = PICKERS[t.id.slice(0, 2)].cur(); toast('Not a color code', 'Use 6 hex digits, like #ff3349.', 'warn', 4000); } }
+    else if (d.perf === 'mouseOn' || d.perf === 'mouse') {
+      // the switch keeps the chosen profile (mouseLast) for the next time it is turned on; the server reads mouse (0 = off)
+      const n = +($('#mouse-set select') || {}).value || mouseSuggest(), on = d.perf === 'mouse' || t.checked;
+      prefs.perf = Object.assign({}, prefs.perf || {}, { mouse: on ? n : 0, mouseLast: n });
+      savePrefs(); applyPerf('mouse');
+    }
     else if (d.perf) {
       prefs.perf = Object.assign({}, prefs.perf || {}, { [d.perf]: t.type === 'checkbox' ? t.checked : /^\d+$/.test(t.value) ? +t.value : t.value });
       savePrefs(); applyPerf(d.perf);
@@ -3215,7 +3270,7 @@
     if (ev.key === 'Enter' && ev.target.id === 's-key') { ev.preventDefault(); saveKey(); return; }
     if (ev.key === 'Enter' && ev.target.id === 'prof-name') { ev.preventDefault(); profSave(ev.target.value); return; }
     if ((ev.key === 'b' || ev.key === 'B') && (ev.ctrlKey || ev.metaKey) && !ev.altKey && !typing()) { ev.preventDefault(); toggleSide(); return; }
-    if (ev.key === '/' && !typing()) { const s = $('#b-q') || $('#c-q') || $('#lib-q') || $('#dl-q'); if (s) { ev.preventDefault(); s.focus(); } }
+    if (ev.key === '/' && !typing()) { const s = $('#b-q') || $('#c-q') || $('#lib-q') || $('#dl-q') || $('#set-q'); if (s) { ev.preventDefault(); s.focus(); } }
     // color wheels: left/right = color, up/down = strength
     if ((ev.target.id === 'cw' || ev.target.id === 'bw') && /^Arrow/.test(ev.key) && !ev.altKey) {
       ev.preventDefault();

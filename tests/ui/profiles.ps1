@@ -35,7 +35,7 @@ try {
     [void](Click '#modal [data-m="1"]'); WaitJobs
     Check ([bool]((Api '/api/state').mods | Where-Object name -eq 'ModE') -and (Api '/api/state').profile -eq 'Story') 'switch: ModE is back on and Story is in use'
     Check ([bool](WaitJs '/In use/.test(document.getElementById("pane").innerText)')) 'pane: refreshed after the switch'
-    [void](Invoke-Cdp 'Page.navigate' @{ url = 'http://localhost:7078/#/settings' }); [void](WaitJs 'document.querySelectorAll(".sx").length === 7')
+    [void](Invoke-Cdp 'Page.navigate' @{ url = 'http://localhost:7078/#/settings' }); [void](WaitJs 'document.querySelectorAll(".sx").length === 8')
     Check ([bool](Js '!!document.querySelector("[data-setting=pruneOld]") && document.querySelector("[data-setting=pruneOld]").checked')) 'settings: old downloads switch, on by default'
     Check (-not @(Get-CdpErrors).Count) "no page errors $(@(Get-CdpErrors) -join ' || ')"
 }
