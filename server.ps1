@@ -6,7 +6,7 @@ $Root = $PSScriptRoot
 
 # The window is hidden, so startup failures would be invisible: log them and show a message box
 function Show-Fatal([string]$Msg) {
-    $log = Join-Path $Root 'cpmods.log'
+    $log = try { (Get-CpPaths).log } catch { Join-Path $Root 'cpmods.log' }
     try { [IO.File]::AppendAllText($log, ('{0:yyyy-MM-dd HH:mm:ss} [server] {1}{2}' -f (Get-Date), $Msg, [Environment]::NewLine)) } catch { }
     if ($Dev) { Write-Host $Msg; return }
     try {
@@ -87,7 +87,8 @@ $shared.uiFile = Join-Path (Get-CpPaths).state 'ui.json'
 $shared.winTitle = if ($Dev) { 'Cyberpunk Mods (dev)' } else { 'Cyberpunk Mods' }
 # taskbar: own button with the window's icon (not PowerShell's); pinning it starts cpmods like the shortcut
 $shared.winAppId = if ($Dev) { 'cpmods.CyberpunkMods.Dev' } else { 'cpmods.CyberpunkMods' }
-$shared.winRelaunch = if ($Dev) { $null } else { '"{0}" -NoProfile -WindowStyle Hidden -ExecutionPolicy Bypass -File "{1}" -Open' -f (Get-PwshPath), (Join-Path $Root 'server.ps1') }
+$exe = Join-Path $Root 'cpmods.exe'
+$shared.winRelaunch = if ($Dev) { $null } elseif (Test-Path -LiteralPath $exe) { '"{0}"' -f $exe } else { '"{0}" -NoProfile -WindowStyle Hidden -ExecutionPolicy Bypass -File "{1}" -Open' -f (Get-PwshPath), (Join-Path $Root 'server.ps1') }
 $shared.winOpen = $false; $shared.winShow = $false; $shared.lean = $false
 
 if ($Dev) { Write-JsonFile $infoFile ([ordered]@{ port = $Port; token = $token; pid = $PID; started = (Get-Date).ToString('s') }) }

@@ -57,6 +57,7 @@ try {
     Check ((Api '/api/state').settings.askOverwrite -eq $true) 'settings: ask switch back on'
     [void](Click '[data-act="sx-all"]'); Start-Sleep -Milliseconds 300
     Check ((Js 'document.querySelectorAll(".sx.open").length') -eq 8) 'settings: expand all'
+    Check ([bool](WaitJs '/cpmods \d+\.\d+/.test((document.querySelector("#upd-set") || {}).innerText || "") && /does not update itself/.test(document.querySelector("#upd-set").innerText)' 8000)) 'settings: App shows the version; this sandbox copy does not update itself'
     Shot 'ui-settings.jpg'
     [void](Click '[data-act="sx-all"]'); Start-Sleep -Milliseconds 300
     Check ((Js 'document.querySelectorAll(".sx.open").length') -eq 0) 'settings: collapse all'

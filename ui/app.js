@@ -604,6 +604,7 @@
     if (g && g.updatePending) bn.push(`<div class="banner">Steam has a Cyberpunk update pending. Downloads wait and installs are blocked until the game is updated.</div>`);
     if (g && g.running) bn.push('<div class="banner">The game is running. Installs and removals wait until you close it.</div>');
     if (st && !st.key) bn.push('<div class="banner">Downloads need your free Nexus API key.<button class="btn sm" data-act="go" data-page="settings">Add it</button></div>');
+    if (S.update && S.update.newer) bn.push(`<div class="banner info">${ic('info')}<span><b>cpmods ${h(S.update.latest)} is out.</b> You choose when to install it.</span><button class="btn sm" data-act="app-update">Update...</button></div>`);
     if (st && !st.handler) bn.push('<div class="banner">Nexus download links do not open cpmods yet.<button class="btn sm" data-act="sys" data-op="register">Fix it</button></div>');
     setHtml($('#banner'), bn.join(''));
   }
@@ -1656,6 +1657,32 @@
   }
 
   // ---------- settings: one collapsible section per topic; the closed header still shows the current values ----------
+  // ---------- updates of cpmods itself (an installed copy; a git copy says it does not update) ----------
+  function updateHtml() {
+    const u = S.update, v = S.st.version || '?';
+    const text = !u ? 'Checking GitHub for a newer version...'
+      : u.error ? `Could not check GitHub: ${h(u.error)}`
+        : !u.can ? 'This copy does not update itself: it is a developer copy (git), or it was installed before cpmods 1.10. Install.cmd from the latest release sets up a copy that does.'
+          : u.newer ? `Version ${h(u.latest)} is out. You choose when to install it; cpmods closes and opens again, your mods and settings stay.`
+            : 'Up to date. cpmods checks GitHub when it starts.';
+    const ctl = !u ? '<span class="spin"></span>' : u.newer ? `<button class="btn sm primary" data-act="app-update">Update to ${h(u.latest)}</button>` : u.can || u.error ? '<button class="btn sm ghost" data-act="app-update-check">Check again</button>' : '';
+    return srow(`cpmods ${h(v)}`, text, ctl);
+  }
+  async function loadUpdate(fresh) {
+    try { S.update = await api('/api/update' + (fresh ? '?fresh=1' : '')); } catch (e) { S.update = { error: e.message }; }
+    renderBanner();
+    const el = $('#upd-set');
+    if (el) el.innerHTML = updateHtml();
+  }
+  async function appUpdate() {
+    const u = S.update;
+    if (!u || !u.newer) return;
+    const notes = u.notes ? `<div class="mono-path" style="white-space:normal;margin-bottom:12px">${h(u.notes).replace(/\r?\n/g, '<br>')}</div>` : '';
+    if (!await ask({ title: `Update cpmods to ${u.latest}?`, body: `${notes}cpmods downloads it from GitHub, checks it, then closes and opens again. Your mods, downloads and settings stay as they are.`, ok: 'Update' })) return;
+    try { await api('/api/update', {}); toast('Updating cpmods', 'It closes and opens again by itself in a few seconds.', '', 20000); }
+    catch (e) { toast('Could not update', e.message, 'bad', 10000); }
+  }
+
   // kw: words the settings search finds a whole section by, besides its name and what it shows
   const SECTIONS = [
     { k: 'downloads', t: 'Downloads and installs', i: 'downloads', kw: 'conflict overwrite' },
@@ -1665,7 +1692,7 @@
     { k: 'nexus', t: 'Nexus account', i: 'key2', kw: 'login nxm' },
     { k: 'patch', t: 'Patch compatibility', i: 'refresh', kw: 'version update' },
     { k: 'share', t: 'Share with friends', i: 'share', kw: 'export' },
-    { k: 'app', t: 'App', i: 'gear', kw: '' },
+    { k: 'app', t: 'App', i: 'gear', kw: 'update version' },
   ];
   const setOpen = () => new Set(Array.isArray(prefs.setOpen) ? prefs.setOpen : ['downloads']);
   const srow = (title, text, ctl) => `<div class="setting"><div class="setting-text"><b>${title}</b><span>${text}</span></div>${ctl}</div>`;
@@ -1680,7 +1707,7 @@
       nexus: [st.key ? 'API key set' : 'API key missing', st.handler ? 'download links work' : 'download links not set up'],
       patch: [`"Updated for ${s.patchLabel}" means updated since ${fmtDate(s.patchDate)}`],
       share: ['App zip, your mod list, your mod settings'],
-      app: [prefs.sideMin ? 'compact sidebar' : '', prefs.explain === true ? 'folders explained' : ''],
+      app: [st.version ? 'version ' + st.version : '', S.update && S.update.newer ? 'update available' : '', prefs.sideMin ? 'compact sidebar' : '', prefs.explain === true ? 'folders explained' : ''],
     }[k] || [];
     return parts.filter(Boolean).join(' · ');
   }
@@ -1702,7 +1729,7 @@
     if (k === 'share') return `<p class="dim small" style="margin:0 0 12px">Creates a zip on your desktop with the app and an Install.cmd. No API key or downloads are included. Mods your friend already has are left alone.</p>
       <label class="check-row"><input type="checkbox" class="check" id="s-share-set"${S.shareSettings ? ' checked' : ''}> Include my mod settings (CET mods, Mod Settings, hotkeys). Your friend restores them in Backups, Mod settings.</label>
       <div class="toolbar" style="margin-top:12px"><button class="btn primary" data-act="package" data-apponly="1">App only</button><button class="btn" data-act="package">App + my mod list</button><button class="btn ghost" data-act="modlist-export">Save mod list file</button></div>`;
-    return srow('Only show missing requirements', 'In a mod\'s details, hide requirements you already have. A "Show" link there brings them back.', `<label class="switch"><input type="checkbox" data-pref="reqMissingOnly"${prefs.reqMissingOnly ? ' checked' : ''} aria-label="Only show missing requirements"><span></span></label>`)
+    return `<div id="upd-set">${updateHtml()}</div>` + srow('Only show missing requirements', 'In a mod\'s details, hide requirements you already have. A "Show" link there brings them back.', `<label class="switch"><input type="checkbox" data-pref="reqMissingOnly"${prefs.reqMissingOnly ? ' checked' : ''} aria-label="Only show missing requirements"><span></span></label>`)
       + srow('Explain game folders', 'In file trees and the folder map, describe what each folder holds.', `<label class="switch"><input type="checkbox" data-pref="explain"${prefs.explain === true ? ' checked' : ''} aria-label="Explain game folders"><span></span></label>`)
       + srow('Compact sidebar', 'Show only icons on the left (Ctrl+B).', `<label class="switch"><input type="checkbox" data-pref="sideMin"${prefs.sideMin ? ' checked' : ''} aria-label="Compact sidebar"><span></span></label>`)
       + srow('Activity log', 'What cpmods did, newest last.', '<button class="btn sm" data-act="tool" data-tool="log">Show log</button>')
@@ -3142,6 +3169,8 @@
     'win': t => window.chrome.webview.postMessage(t.dataset.v),
     'tb-reload': () => location.reload(),
     'perf-free': () => { IMG.free(); api('/api/free', {}).catch(() => { }); toast('Freeing memory', 'New numbers in a few seconds.', '', 2500); setTimeout(loadPerfNow, 4000); },
+    'app-update': () => appUpdate(),
+    'app-update-check': () => { S.update = null; const el = $('#upd-set'); if (el) el.innerHTML = updateHtml(); loadUpdate(true); },
     'mouse-refresh': () => { S.mouse = null; const el = $('#mouse-set'); if (el) el.innerHTML = mouseHtml(); loadMouse(); },
     'perf-refresh': () => { S.perfNow = null; const el = $('#perf-now'); if (el) el.innerHTML = perfNowHtml(); loadPerfNow(); },
     'toast-close': t => { const x = t.closest('.toast'); if (x) x.remove(); },
@@ -3377,7 +3406,7 @@
     S.modSig = modSig;
     renderNav(); renderSideFoot(); renderBanner(); renderActivity();
     const sig = stateSig(st);
-    if (!S.booted) { S.booted = true; S.sig = sig; renderPage(); if (S.pane) renderPane(); return; }
+    if (!S.booted) { S.booted = true; S.sig = sig; renderPage(); if (S.pane) renderPane(); loadUpdate(); return; }
     if (sig !== S.sig) {
       S.sig = sig;
       if (S.lib.compatStale && (S.page === 'library' || S.page === 'compat')) debounce('compat', () => ensureCompat(true), 1500);

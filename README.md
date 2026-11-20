@@ -26,9 +26,11 @@ A simple mod manager for Cyberpunk 2077 on Windows. Find mods on Nexus, click "S
 2. Right-click the zip, "Extract All...", then double-click `Install.cmd` in the extracted folder.
 3. Follow the window. It installs PowerShell 7 if needed, finds your game (Steam, GOG or Epic), and asks for your Nexus API key (a free account is enough: <https://next.nexusmods.com/settings/api-keys>).
 
-Then open "Cyberpunk Mods" from the desktop or the Start menu. Running `Install.cmd` from a newer release updates cpmods and keeps your mods and settings.
+Then open "Cyberpunk Mods" from the desktop or the Start menu. cpmods installs to `%LOCALAPPDATA%\Programs\cpmods` (no admin needed), starts from `cpmods.exe`, and shows in Windows Settings, Apps, where Uninstall removes the app but leaves your mods and data.
 
-From a clone of this repository: run `pwsh -File setup.ps1` (PowerShell 7.2 or newer).
+**Updates.** When a new release is out, cpmods says so (banner and Settings, App) and updates with one click: it downloads the release from GitHub, checks its SHA-256, then closes and opens again. Your mods and settings stay. Copies installed before 1.10 need `Install.cmd` from a newer release once; it moves them to the new layout and keeps everything.
+
+From a clone of this repository: run `pwsh -File setup.ps1` (PowerShell 7.2 or newer). A git copy keeps its data beside the code and never updates itself.
 
 ## Requirements
 
@@ -39,7 +41,7 @@ From a clone of this repository: run `pwsh -File setup.ps1` (PowerShell 7.2 or n
 
 ## Your data
 
-Everything stays on your PC, in `%LOCALAPPDATA%\cpmods`. The Nexus API key is stored encrypted for your Windows user. cpmods talks only to Nexus Mods and GitHub (for framework releases). The app window talks to a small local server on `localhost`, protected by a random token made at each start.
+Everything stays on your PC, in `%LOCALAPPDATA%\cpmods`. The Nexus API key is stored encrypted for your Windows user. cpmods talks only to Nexus Mods and GitHub (for framework releases and its own updates). The app window talks to a small local server on `localhost`, protected by a random token made at each start.
 
 ## Tests
 

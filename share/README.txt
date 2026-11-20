@@ -24,7 +24,10 @@ Any game file cpmods overwrites is backed up and restored when you remove
 that mod in cpmods.
 
 Later: open "Cyberpunk Mods" from the desktop or the Start menu.
-Running Install.cmd again updates cpmods and keeps your mods and settings.
+When a new version is out, cpmods says so and updates itself with one click
+(your mods and settings stay). It installs to %LOCALAPPDATA%\Programs\cpmods,
+keeps your data in %LOCALAPPDATA%\cpmods, and can be removed in Windows
+Settings, Apps (your mods stay in the game).
 
 Something went wrong? The window says what to do. Everything is written to
   %LOCALAPPDATA%\cpmods-setup.log

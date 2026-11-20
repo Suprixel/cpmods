@@ -1,7 +1,11 @@
 # cpmods core: game state, tracked install/remove, frameworks, Nexus API
 $ErrorActionPreference = 'Stop'
 
-$script:Root = Split-Path -Parent $PSScriptRoot
+$script:AppVersion = '1.10.0'
+# App: the program files. Root: the data (config, state, downloads, backups). They share a folder in a git or older copy
+# (config.json beside the program); an installed copy keeps data in %LOCALAPPDATA%\cpmods, so an update can swap the app folder whole
+$script:App = Split-Path -Parent $PSScriptRoot
+$script:Root = if ([IO.File]::Exists((Join-Path $script:App 'config.json'))) { $script:App } else { Join-Path $env:LOCALAPPDATA 'cpmods' }
 $script:Cfg = [IO.File]::ReadAllText((Join-Path $script:Root 'config.json')) | ConvertFrom-Json
 $script:Game = $script:Cfg.gamePath
 $script:NexusGame = $script:Cfg.nexusGame
@@ -11,7 +15,7 @@ $script:SettingsFile = Join-Path $script:StateDir 'settings.json'
 $script:ServerFile = Join-Path $script:StateDir 'server.json'
 $script:KeyFile = Join-Path $script:StateDir 'nexus.key'
 $script:QueueFile = Join-Path $script:Root 'queue.json'
-$script:FwFile = Join-Path $script:Root 'frameworks.json'
+$script:FwFile = Join-Path $script:App 'frameworks.json'
 $script:DlDir = Join-Path $script:Root 'downloads'
 $script:BkDir = Join-Path $script:Root 'backup'
 $script:TmpDir = Join-Path $script:Root 'tmp'
@@ -25,7 +29,7 @@ foreach ($d in $script:StateDir, $script:DlDir, $script:BkDir, $script:TmpDir) {
 
 #region basics
 function Set-CpContext([string]$Tag, [bool]$Quiet = $false) { $script:LogTag = $Tag; $script:Quiet = $Quiet }
-function Get-CpPaths { [ordered]@{ root = $script:Root; game = $script:Game; downloads = $script:DlDir; state = $script:StateDir; log = $script:LogFile } }
+function Get-CpPaths { [ordered]@{ root = $script:Root; app = $script:App; game = $script:Game; downloads = $script:DlDir; state = $script:StateDir; log = $script:LogFile } }
 
 function Write-Note([string]$Msg, [string]$Color = 'Gray') {
     if (-not $script:Quiet) { Write-Host $Msg -ForegroundColor $Color }
@@ -1546,11 +1550,13 @@ function New-CpPackage([string]$OutDir, [switch]$NoModList, [string]$SettingsZip
     $app = Join-Path $stage 'cpmods'
     [void](New-Item -ItemType Directory -Force -Path (Join-Path $app 'lib'), (Join-Path $app 'ui'))
     try {
-        Copy-Item -Path (Join-Path $script:Root 'lib\*.psm1'), (Join-Path $script:Root 'lib\cpwindow.ps1') -Destination (Join-Path $app 'lib')
-        Copy-Item -LiteralPath (Join-Path $script:Root 'lib\webview2') -Destination (Join-Path $app 'lib') -Recurse
-        Copy-Item -Path (Join-Path $script:Root 'ui\*') -Destination (Join-Path $app 'ui')
-        foreach ($f in 'server.ps1', 'cpmods.ps1', 'cpmods.cmd', 'frameworks.json', 'setup.ps1', 'bootstrap.ps1') { Copy-Item -LiteralPath (Join-Path $script:Root $f) -Destination $app }
-        Copy-Item -LiteralPath (Join-Path $script:Root 'share\Install.cmd'), (Join-Path $script:Root 'share\README.txt') -Destination $stage
+        Copy-Item -Path (Join-Path $script:App 'lib\*.psm1'), (Join-Path $script:App 'lib\*.ps1') -Destination (Join-Path $app 'lib')
+        Copy-Item -LiteralPath (Join-Path $script:App 'lib\webview2') -Destination (Join-Path $app 'lib') -Recurse
+        Copy-Item -Path (Join-Path $script:App 'ui\*') -Destination (Join-Path $app 'ui')
+        foreach ($f in 'server.ps1', 'cpmods.ps1', 'cpmods.cmd', 'frameworks.json', 'setup.ps1', 'bootstrap.ps1', 'uninstall.ps1') { Copy-Item -LiteralPath (Join-Path $script:App $f) -Destination $app }
+        # without it the app still runs (setup then makes PowerShell shortcuts)
+        try { New-CpLauncher (Join-Path $app 'cpmods.exe') } catch { Write-Note "Share package without cpmods.exe: $($_.Exception.Message)" Yellow }
+        Copy-Item -LiteralPath (Join-Path $script:App 'share\Install.cmd'), (Join-Path $script:App 'share\README.txt') -Destination $stage
         if (-not $NoModList) { Write-JsonFile (Join-Path $stage 'modlist.json') (Export-ModList) }
         if ($SettingsZip) { Copy-Item -LiteralPath $SettingsZip -Destination (Join-Path $stage 'mod-settings.zip') }
         $zip = Join-Path $OutDir $(if ($NoModList) { 'cpmods-app.zip' } else { 'cpmods-share.zip' })
@@ -1729,7 +1735,7 @@ function Get-PwshPath {
 }
 
 function Register-NxmHandler {
-    $cmd = '"{0}" -NoProfile -WindowStyle Hidden -ExecutionPolicy Bypass -File "{1}" nxm "%1"' -f (Get-PwshPath), (Join-Path $script:Root 'cpmods.ps1')
+    $cmd = '"{0}" -NoProfile -WindowStyle Hidden -ExecutionPolicy Bypass -File "{1}" nxm "%1"' -f (Get-PwshPath), (Join-Path $script:App 'cpmods.ps1')
     $base = 'HKCU:\Software\Classes\nxm'
     [void](New-Item -Path "$base\shell\open\command" -Force)
     Set-ItemProperty -Path $base -Name '(default)' -Value 'URL:NXM Protocol'
@@ -1744,7 +1750,7 @@ function Write-ServerInfo([int]$Port, [string]$Token) { Write-JsonFile $script:S
 function Remove-ServerInfo { $i = Get-ServerInfo; if ($i -and [int]$i.pid -eq $PID) { Remove-Item -LiteralPath $script:ServerFile -Force -ErrorAction SilentlyContinue } }
 
 function Start-CpServer([switch]$Open) {
-    $a = @('-NoProfile', '-WindowStyle', 'Hidden', '-ExecutionPolicy', 'Bypass', '-File', ('"{0}"' -f (Join-Path $script:Root 'server.ps1')))
+    $a = @('-NoProfile', '-WindowStyle', 'Hidden', '-ExecutionPolicy', 'Bypass', '-File', ('"{0}"' -f (Join-Path $script:App 'server.ps1')))
     if ($Open) { $a += '-Open' }
     Start-Process -FilePath (Get-PwshPath) -ArgumentList $a -WindowStyle Hidden
 }
@@ -1770,18 +1776,77 @@ function Open-CpWindow([int]$Port = 7077, [string]$Token, [switch]$Browser) {
 function New-CpShortcuts {
     $ws = New-Object -ComObject WScript.Shell
     $icon = Join-Path $script:Game 'bin\x64\Cyberpunk2077.exe'
+    $exe = Join-Path $script:App 'cpmods.exe'
     foreach ($dir in [Environment]::GetFolderPath('Desktop'), [Environment]::GetFolderPath('Programs')) {
         $path = Join-Path $dir 'Cyberpunk Mods.lnk'
         $lnk = $ws.CreateShortcut($path)
-        $lnk.TargetPath = Get-PwshPath
-        $lnk.Arguments = '-NoProfile -WindowStyle Hidden -ExecutionPolicy Bypass -File "{0}" -Open' -f (Join-Path $script:Root 'server.ps1')
-        $lnk.WorkingDirectory = $script:Root
+        if (Test-Path -LiteralPath $exe) { $lnk.TargetPath = $exe; $lnk.Arguments = '' }
+        else { $lnk.TargetPath = Get-PwshPath; $lnk.Arguments = '-NoProfile -WindowStyle Hidden -ExecutionPolicy Bypass -File "{0}" -Open' -f (Join-Path $script:App 'server.ps1') }
+        $lnk.WorkingDirectory = $script:App
         $lnk.IconLocation = "$icon,0"
         $lnk.Description = 'Cyberpunk 2077 mod manager (cpmods)'
         $lnk.WindowStyle = 7
         $lnk.Save()
         $path
     }
+}
+
+# cpmods.exe: starts the app hidden with PowerShell 7; built with the .NET Framework compiler every Windows 10/11 has
+function New-CpLauncher([string]$OutFile) {
+    $csc = Join-Path $env:WINDIR 'Microsoft.NET\Framework64\v4.0.30319\csc.exe'
+    $src = Join-Path $script:TmpDir "launcher-$PID.cs"
+    [IO.File]::WriteAllText($src, [IO.File]::ReadAllText((Join-Path $script:App 'share\launcher.cs')).Replace('CPMODS_VERSION', $script:AppVersion))
+    try {
+        $o = & $csc /nologo /target:winexe /optimize "/out:$OutFile" "/win32icon:$(Join-Path $script:App 'share\cpmods.ico')" /r:System.Windows.Forms.dll $src 2>&1
+        if ($LASTEXITCODE) { throw "cpmods.exe did not compile: $(($o | Select-Object -Last 3) -join ' ')" }
+    }
+    finally { Remove-Item -LiteralPath $src -Force -ErrorAction SilentlyContinue }
+}
+#endregion
+
+#region updates: an installed copy (data outside the app folder, no git) updates from the GitHub releases when you say so
+$script:Repo = 'Suprixel/cpmods'
+function Get-CpVersion { $script:AppVersion }
+function Test-CpCanUpdate { $script:App -ne $script:Root -and -not (Test-Path -LiteralPath (Join-Path $script:App '.git')) }
+function Test-NewerVersion([string]$A, [string]$B) { $x = $null; $y = $null; [version]::TryParse($A, [ref]$x) -and [version]::TryParse($B, [ref]$y) -and $x -gt $y }
+
+# the latest release: version, notes, the app zip and its SHA-256 (GitHub's own digest). A copy that cannot update asks GitHub nothing
+function Get-CpUpdate {
+    $u = [ordered]@{ current = $script:AppVersion; can = (Test-CpCanUpdate); latest = $null; newer = $false; notes = ''; page = "https://github.com/$($script:Repo)/releases"; zip = $null; sha256 = $null }
+    if (-not $u.can) { return $u }
+    $r = Invoke-RestMethod "https://api.github.com/repos/$($script:Repo)/releases/latest" -Headers @{ 'User-Agent' = 'cpmods' } -TimeoutSec 20
+    $a = @($r.assets | Where-Object { $_.name -like 'cpmods-*.zip' }) | Select-Object -First 1
+    $u.latest = "$($r.tag_name)".TrimStart('v'); $u.notes = "$($r.body)"; $u.page = "$($r.html_url)"
+    $u.newer = [bool]($a -and (Test-NewerVersion $u.latest $script:AppVersion))
+    if ($a) { $u.zip = "$($a.browser_download_url)"; if ("$($a.digest)" -match '^sha256:([0-9a-f]{64})$') { $u.sha256 = $Matches[1] } }
+    $u
+}
+
+# downloads and checks the new version, unpacks it beside the data and hands over to its cpupdate.ps1, which swaps the
+# app folder once this server has quit (the caller stops it) and starts the new version. Nothing changes when a check fails
+function Start-CpUpdate($Job) {
+    $u = Get-CpUpdate
+    if (-not $u.can) { throw 'This copy of cpmods does not update itself' }
+    if (-not $u.newer) { throw 'cpmods is up to date' }
+    if (-not $u.sha256) { throw 'The release has no checksum, so it was not installed' }
+    if ($u.zip -notmatch '^https://github\.com/') { throw "Unexpected download address: $($u.zip)" }
+    $stage = Join-Path $script:TmpDir "update-$($u.latest)"
+    Remove-Item -LiteralPath $stage -Recurse -Force -ErrorAction SilentlyContinue
+    [void](New-Item -ItemType Directory -Force -Path $stage)
+    $zip = Join-Path $stage 'cpmods.zip'
+    if ($Job) { $Job.phase = 'downloading' }
+    Save-UrlToFile $u.zip $zip $Job
+    if ((Get-FileHash -LiteralPath $zip -Algorithm SHA256).Hash -ne $u.sha256) { throw 'The download does not match its checksum; nothing was changed' }
+    Expand-Archive -LiteralPath $zip -DestinationPath $stage -Force
+    $new = Join-Path $stage 'cpmods'
+    foreach ($f in 'server.ps1', 'cpmods.exe', 'lib\cpmods.psm1', 'lib\cpupdate.ps1') { if (-not (Test-Path -LiteralPath (Join-Path $new $f))) { throw "The new version is incomplete ($f is missing); nothing was changed" } }
+    # the swap runs from a copy outside both folders
+    $runner = Join-Path $script:TmpDir 'cpupdate.ps1'
+    Copy-Item -LiteralPath (Join-Path $new 'lib\cpupdate.ps1') -Destination $runner -Force
+    $a = @('-NoProfile', '-WindowStyle', 'Hidden', '-ExecutionPolicy', 'Bypass', '-File', "`"$runner`"", '-From', "`"$new`"", '-To', "`"$($script:App)`"", '-WaitPid', $PID, '-Version', $u.latest, '-Log', "`"$($script:LogFile)`"")
+    Start-Process -FilePath (Get-PwshPath) -ArgumentList $a -WindowStyle Hidden -WorkingDirectory $script:TmpDir
+    Write-Note "Updating to $($u.latest): cpmods closes and opens again"
+    "Updating to $($u.latest)"
 }
 #endregion
 

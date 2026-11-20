@@ -1,9 +1,12 @@
-# cpmods first-time setup on a new PC (Install.cmd -> bootstrap.ps1 -> this, in PowerShell 7)
+# cpmods first-time setup on a new PC (Install.cmd -> bootstrap.ps1 -> this, in PowerShell 7); running it again updates cpmods.
+# The app goes to %LOCALAPPDATA%\Programs\cpmods, your data (config, mod list, downloads, backups) to %LOCALAPPDATA%\cpmods.
 # -Check: dry run into a temp folder (no shortcuts, links, frameworks or app start)
 param([switch]$Check)
 $ErrorActionPreference = 'Stop'
 $src = $PSScriptRoot
-$dest = if ($Check) { Join-Path ([IO.Path]::GetTempPath()) ('cpmods-check-' + [guid]::NewGuid().ToString('N').Substring(0, 8)) } else { Join-Path $env:LOCALAPPDATA 'cpmods' }
+$dest = if ($Check) { Join-Path ([IO.Path]::GetTempPath()) ('cpmods-check-' + [guid]::NewGuid().ToString('N').Substring(0, 8)) } else { Join-Path $env:LOCALAPPDATA 'Programs\cpmods' }
+# check mode keeps its config beside the app (the older layout), so nothing outside its temp folder is touched
+$data = if ($Check) { $dest } else { Join-Path $env:LOCALAPPDATA 'cpmods' }
 $log = if ($Check) { Join-Path ([IO.Path]::GetTempPath()) 'cpmods-check.log' } else { Join-Path $env:LOCALAPPDATA 'cpmods-setup.log' }
 $steps = 7
 function Say([string]$M, [string]$C = 'Gray') { Write-Host $M -ForegroundColor $C }
@@ -67,13 +70,21 @@ try {
     Say "PowerShell $($PSVersionTable.PSVersion), Windows $([Environment]::OSVersion.Version)" DarkGray
 
     Step 1 'Copying cpmods'
-    if (-not $Check) { Stop-OldServer $dest }
+    if (-not $Check) { Stop-OldServer $data }
     # drop the "downloaded from the internet" mark on the app files only (state\ may hold files the app window keeps open)
     Get-ChildItem -LiteralPath $src -Recurse -File -ErrorAction SilentlyContinue | Where-Object { $_.FullName -notmatch '\\(state|downloads|backup|tmp)\\' } | Unblock-File -ErrorAction SilentlyContinue
     if ($src -ne $dest) {
+        # a fresh copy each time, so files a newer version dropped do not linger (the data lives elsewhere)
+        if (-not $Check -and (Test-Path -LiteralPath (Join-Path $dest 'server.ps1'))) { Remove-Item -LiteralPath $dest -Recurse -Force }
         [void](New-Item -ItemType Directory -Force -Path $dest)
         Copy-Item -Path (Join-Path $src '*') -Destination $dest -Recurse -Force
     }
+    # cpmods 1.9 and older ran from the data folder: its program files go, the data stays
+    if ($data -ne $dest -and (Test-Path -LiteralPath (Join-Path $data 'server.ps1'))) {
+        foreach ($f in 'lib', 'ui', 'server.ps1', 'cpmods.ps1', 'cpmods.cmd', 'frameworks.json', 'setup.ps1', 'bootstrap.ps1') { Remove-Item -LiteralPath (Join-Path $data $f) -Recurse -Force -ErrorAction SilentlyContinue }
+        Say "Moved the app to $dest; your mods and settings stay in $data" Green
+    }
+    [void](New-Item -ItemType Directory -Force -Path $data)
     Get-ChildItem -LiteralPath $dest -Recurse -File -ErrorAction SilentlyContinue | Where-Object { $_.FullName -notmatch '\\(state|downloads|backup|tmp)\\' } | Unblock-File -ErrorAction SilentlyContinue
     Say "Installed to $dest" Green
 
@@ -92,7 +103,7 @@ try {
         Say 'Mods cannot be installed there like this. Close this window, right-click Install.cmd and choose "Run as administrator", or move the game to a folder you own (for example D:\Games).' Yellow
         throw 'No write access to the game folder'
     }
-    [IO.File]::WriteAllText((Join-Path $dest 'config.json'), (@{ gamePath = $game.path; steamManifest = $game.manifest; nexusGame = 'cyberpunk2077' } | ConvertTo-Json))
+    [IO.File]::WriteAllText((Join-Path $data 'config.json'), (@{ gamePath = $game.path; steamManifest = $game.manifest; nexusGame = 'cyberpunk2077' } | ConvertTo-Json))
     Import-Module (Join-Path $dest 'lib\cpmods.psm1') -Force -DisableNameChecking
     Import-Module (Join-Path $dest 'lib\cpinsight.psm1') -Force -DisableNameChecking
     Import-Module (Join-Path $dest 'lib\cpserver.psm1') -Force -DisableNameChecking
@@ -136,6 +147,13 @@ try {
     if ($takeOver) { Register-NxmHandler; Say 'Nexus download links now open cpmods.' Green }
     else { Say 'Left as is. cpmods can still install archives you download yourself (Downloads page).' Yellow }
     New-CpShortcuts | ForEach-Object { Say "Shortcut: $_" Green }
+    # Windows Settings, Apps: name, version and Uninstall (uninstall.ps1 keeps your data and mods)
+    $u = 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Uninstall\cpmods'
+    [void](New-Item -Path $u -Force)
+    $vals = [ordered]@{ DisplayName = 'Cyberpunk Mods (cpmods)'; DisplayVersion = (Get-CpVersion); Publisher = 'cpmods'; InstallLocation = $dest; DisplayIcon = (Join-Path $dest 'cpmods.exe')
+        UninstallString = ('"{0}" -NoProfile -ExecutionPolicy Bypass -File "{1}"' -f (Get-PwshPath), (Join-Path $dest 'uninstall.ps1')); URLInfoAbout = 'https://github.com/Suprixel/cpmods' }
+    foreach ($k in $vals.Keys) { Set-ItemProperty -LiteralPath $u -Name $k -Value $vals[$k] }
+    foreach ($k in 'NoModify', 'NoRepair') { Set-ItemProperty -LiteralPath $u -Name $k -Value 1 -Type DWord }
 
     Step 6 'Mod frameworks (CET, RED4ext, redscript, ArchiveXL, TweakXL, Codeware...)'
     $ver = 0.0
@@ -170,7 +188,7 @@ try {
     $ok = $false
     for ($n = 0; $n -lt 40 -and -not $ok; $n++) {
         Start-Sleep -Milliseconds 500
-        $i = Get-RunningServer $dest
+        $i = Get-RunningServer $data
         if ($i -and (Test-Server $i)) { $ok = $true }
     }
     if ($ok) {

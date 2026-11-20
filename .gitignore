@@ -12,4 +12,5 @@
 !/cpmods.cmd
 !/setup.ps1
 !/bootstrap.ps1
+!/uninstall.ps1
 !/frameworks.json

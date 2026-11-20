@@ -116,6 +116,13 @@ param($Job, $P, $Shared)
 try { Use-Lock { Invoke-ModPack $P.pack @($P.use) $Job -Start } }
 finally { $Shared.cache.Remove('fwupdates') }
 '@
+    # the new version swaps in once this server has quit, then opens again
+    update      = @'
+param($Job, $P, $Shared)
+$r = Start-CpUpdate $Job
+$Shared.stop = $true
+$r
+'@
 }
 
 function Send-Bytes($Ctx, [byte[]]$Bytes, [string]$Type, [int]$Code = 200) {
@@ -207,7 +214,7 @@ function Get-UiStateKey($Shared) {
     $p = Get-CpPaths
     $sb = [Text.StringBuilder]::new()
     $man = Get-Cached $Shared 'manifest' 3600 { "$(([IO.File]::ReadAllText((Join-Path $p.root 'config.json')) | ConvertFrom-Json).steamManifest)" }
-    foreach ($f in (Join-Path $p.state 'mods.json'), (Join-Path $p.state 'settings.json'), (Join-Path $p.state 'bisect.json'), (Join-Path $p.state 'vanilla.json'), (Join-Path $p.state 'nexus.key'), (Join-Path $p.state 'profiles.json'), (Join-Path $p.root 'queue.json'), (Join-Path $p.root 'frameworks.json'), $p.downloads, (Join-Path $p.game 'bin\x64\Cyberpunk2077.exe'), $man) {
+    foreach ($f in (Join-Path $p.state 'mods.json'), (Join-Path $p.state 'settings.json'), (Join-Path $p.state 'bisect.json'), (Join-Path $p.state 'vanilla.json'), (Join-Path $p.state 'nexus.key'), (Join-Path $p.state 'profiles.json'), (Join-Path $p.root 'queue.json'), (Join-Path $p.app 'frameworks.json'), $p.downloads, (Join-Path $p.game 'bin\x64\Cyberpunk2077.exe'), $man) {
         if ($f) { [void]$sb.Append([IO.File]::GetLastWriteTimeUtc($f).Ticks).Append('|') }
     }
     foreach ($j in @($Shared.jobs.Clone().Values)) { [void]$sb.Append("$($j.id):$($j.status):$($j.phase):$($j.done):$($j.total):$($j.detail):$($j.error):$($j.next)|") }
@@ -350,6 +357,7 @@ function Get-UiState($Shared) {
     # not while a job runs: it may hold the lock, and its changes must not count as known good (the job's end rebuilds the state)
     if ($Shared.cleanDue -and -not @($jobs | Where-Object { $_.status -eq 'running' }).Count) { $v = $Shared.cleanDue; $Shared.cleanDue = $null; try { Save-CleanRestorePoint $v } catch { } }
     [ordered]@{
+        version    = Get-CpVersion
         game       = Get-GameState
         settings   = Get-CpSettings
         key        = Test-NexusKey
@@ -457,6 +465,14 @@ function Invoke-CpRequest {
             'GET /api/modcats' {
                 $cats = Get-Cached $Shared 'modcats' 86400 { @((Invoke-NexusV1 'games/cyberpunk2077.json').categories | Where-Object { $_.parent_category } | ForEach-Object { $_.name } | Sort-Object -Unique) }
                 Send-Json $Ctx @{ categories = @($cats) }
+            }
+            # cpmods itself: checked on GitHub at most every 6 hours unless asked
+            'GET /api/update' { Send-Json $Ctx (Get-Cached $Shared 'appupdate' $(if ($q['fresh']) { 0 } else { 21600 }) { Get-CpUpdate }) }
+            'POST /api/update' {
+                if (@($Shared.jobs.Clone().Values | Where-Object { $_.status -eq 'running' }).Count) { throw 'Wait until the running tasks finish, then update' }
+                if ((Get-GameState).running) { throw 'Close the game first: cpmods closes and opens again during the update' }
+                $j = Start-CpJob $Shared 'update' 'Updating cpmods' @{}
+                Send-Json $Ctx @{ ok = $true; job = $j.id }
             }
             'GET /api/fwupdates' { Send-Json $Ctx @{ items = @(Get-Cached $Shared 'fwupdates' 1800 { @(Get-FrameworkUpdates) }) } }
             'GET /api/check' { Send-Json $Ctx (Test-Install) }

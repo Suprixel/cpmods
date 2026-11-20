@@ -505,6 +505,31 @@ try {
     Check ($l.modId -eq 107 -and $l.fileId -eq 12345 -and $l.key -eq 'ab/c' -and $l.expires -eq '1700000000') "T36 a Nexus link gives mod, file, key and expiry: $($l | ConvertTo-Json -Compress)"
     foreach ($bad in 'nxm://skyrimspecialedition/mods/1/files/2?key=a&expires=1', 'nxm://cyberpunk2077/mods/x/files/2?key=a', 'https://example.com/?nxm://cyberpunk2077/mods/1/files/2?key=a', '') { $err = try { [void](Resolve-NxmLink $bad); '' } catch { 'refused' }; Check ($err -eq 'refused') "T36 link refused: '$bad'" }
 
+    Write-Host '--- T37: installed copies: data outside the app, cpmods.exe, updates checked and swapped whole'
+    Check ((Test-NewerVersion '1.10.0' '1.9.0') -and -not (Test-NewerVersion '1.9.0' '1.9.0') -and -not (Test-NewerVersion 'v2' '1.0')) 'T37 version compare (1.10 is newer than 1.9)'
+    $u = Get-CpUpdate
+    Check (-not $u.can -and $u.current -eq (Get-CpVersion) -and -not $u.latest) 'T37 a copy with its data beside it (git, older installs) does not update and asks GitHub nothing'
+    $ia = "$Sb\inst\app"; $la = "$Sb\inst\la"
+    New-Item -ItemType Directory -Force "$ia\lib", "$la\cpmods" | Out-Null
+    Copy-Item "$Sb\lib\*.psm1" "$ia\lib"; Copy-Item "$Sb\config.json" "$la\cpmods"
+    $r = @(pwsh -NoProfile -Command "`$env:LOCALAPPDATA = '$la'; Import-Module '$ia\lib\cpmods.psm1' -DisableNameChecking; (Get-CpPaths).root; (Get-CpPaths).app; Test-CpCanUpdate")
+    Check ($r[0] -eq "$la\cpmods" -and $r[1] -eq $ia -and $r[2] -eq 'True') "T37 an installed copy keeps its data in LOCALAPPDATA\cpmods and may update: $($r -join ' | ')"
+    $to = "$Sb\swap\app"; $from = "$Sb\swap\new"; $lg = "$Sb\swap\log.txt"
+    New-Item -ItemType Directory -Force "$to\lib", "$from\lib" | Out-Null
+    'old' | Set-Content "$to\server.ps1"; 'gone in the new version' | Set-Content "$to\lib\old.psm1"; 'new' | Set-Content "$from\server.ps1"
+    pwsh -NoProfile -File (Join-Path (Split-Path $PSScriptRoot) 'lib\cpupdate.ps1') -From $from -To $to -Log $lg
+    Check ((Get-Content "$to\server.ps1") -eq 'new' -and -not (Test-Path "$to\lib\old.psm1") -and -not (Test-Path "$to.old") -and -not (Test-Path $from) -and (Get-Content $lg -Raw) -match 'Updated to') 'T37 an update swaps the app folder whole and leaves nothing behind'
+    $fz = "$Sb\swap\rel.zip"; New-Item -ItemType Directory -Force "$Sb\swap\rel\cpmods\lib" | Out-Null; 'x' | Set-Content "$Sb\swap\rel\cpmods\server.ps1"; Compress-Archive "$Sb\swap\rel\*" $fz -Force
+    & (Get-Module cpmods) { param($z) $script:FakeZip = $z; function script:Get-CpUpdate { [ordered]@{ can = $true; newer = $true; latest = '9.9.9'; zip = 'https://github.com/x/y.zip'; sha256 = $script:FakeSha } }; function script:Save-UrlToFile([string]$Url, [string]$OutFile, $Job) { Copy-Item -LiteralPath $script:FakeZip -Destination $OutFile } } $fz
+    & (Get-Module cpmods) { $script:FakeSha = '0' * 64 }
+    $e1 = try { [void](Start-CpUpdate); '' } catch { $_.Exception.Message }
+    & (Get-Module cpmods) { $script:FakeSha = (Get-FileHash $script:FakeZip -Algorithm SHA256).Hash }
+    $e2 = try { [void](Start-CpUpdate); '' } catch { $_.Exception.Message }
+    Check ($e1 -like '*does not match its checksum*' -and $e2 -like '*incomplete (cpmods.exe is missing)*') "T37 a bad download or an incomplete release changes nothing: $e1 / $e2"
+    New-Item -ItemType Directory -Force "$Sb\share" | Out-Null; Copy-Item (Join-Path (Split-Path $PSScriptRoot) 'share\launcher.cs'), (Join-Path (Split-Path $PSScriptRoot) 'share\cpmods.ico') "$Sb\share"
+    New-CpLauncher "$Sb\swap\cpmods.exe"
+    Check ((Get-Item "$Sb\swap\cpmods.exe").VersionInfo.FileVersion -eq (Get-CpVersion)) 'T37 cpmods.exe compiles and carries the app version'
+
     Write-Host '--- T34: mouse onboard profiles: directory and polling rate bytes (as read from a PRO X 2)'
     $dir = [byte[]](0, 1, 1, 0, 0, 2, 0, 0, 1, 0, 1, 0) + [byte[]](@(0xFF) * 20)
     $pl = @(ConvertFrom-CpProfileDir $dir)

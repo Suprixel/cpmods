@@ -93,7 +93,8 @@ public static class CpAppId {
 }
 '@
 try {
-    $binDir = Join-Path $Root 'state\bin'
+    # data, not program files: the state folder is the one holding $DataDir (an installed copy keeps it outside the app)
+    $binDir = Join-Path (Split-Path $DataDir) 'bin'
     $tag = [Convert]::ToHexString([Security.Cryptography.SHA256]::HashData([Text.Encoding]::UTF8.GetBytes("$frameSrc|$([Environment]::Version)"))).Substring(0, 12)
     $dll = Join-Path $binDir "CpFrame-$tag.dll"
     if (-not ('CpFrame' -as [type])) {
@@ -122,7 +123,7 @@ if (-not ($env:CPMODS_CDP -and -not $env:CPMODS_VISIBLE -and $Shared.winTitle -l
 }
 
 # first start after the Edge window: carry its stored page data over once
-$oldLs = Join-Path $Root 'state\edge\Default\Local Storage'
+$oldLs = Join-Path (Split-Path $DataDir) 'edge\Default\Local Storage'
 if (-not (Test-Path -LiteralPath $DataDir) -and (Test-Path -LiteralPath $oldLs)) {
     try { $newLs = Join-Path $DataDir 'EBWebView\Default'; [void](New-Item -ItemType Directory -Force -Path $newLs); Copy-Item -LiteralPath $oldLs -Destination $newLs -Recurse -Force } catch { }
 }
