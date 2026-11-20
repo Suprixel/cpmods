@@ -206,9 +206,9 @@ function Invoke-Profile([string]$Name, $Job) {
 #endregion
 
 #region modpacks: gets the mods of a code or mod list. A restore point and a mod settings backup come first;
-# $UsePack names your mods that take the pack's version (the others keep yours). Downloads go through the queue
-# (-Start opens its first Nexus page).
-function Invoke-ModPack($Pack, [string[]]$UsePack, $Job, [switch]$Start) {
+# $UsePack names your mods that take the pack's version (the others keep yours). $Files and $TurnOn are the new
+# files and your turned-off mods ticked in the picker ($null = all). Downloads go through the queue (-Start opens its first Nexus page).
+function Invoke-ModPack($Pack, [string[]]$UsePack, $Job, [switch]$Start, [int[]]$Files, [string[]]$TurnOn) {
     Assert-GameReady
     if (Get-BisectState) { throw 'Troubleshooting is running: finish it first, then get the modpack' }
     $plan = Get-PackPlan $Pack
@@ -222,7 +222,9 @@ function Invoke-ModPack($Pack, [string[]]$UsePack, $Job, [switch]$Start) {
     }
     # your mods that are off come back on, also the ones whose version you keep
     $on = 0
-    foreach ($n in @(@($plan.turnOn) + @($plan.versions | Where-Object { -not $_.on -and $UsePack -notcontains $_.name } | ForEach-Object { $_.name }))) {
+    $new = @($plan.new | Where-Object { $null -eq $Files -or $Files -contains $_.fileId })
+    $ons = @($plan.turnOn | Where-Object { $null -eq $TurnOn -or $TurnOn -contains $_.name } | ForEach-Object { $_.name })
+    foreach ($n in @($ons + @($plan.versions | Where-Object { -not $_.on -and $UsePack -notcontains $_.name } | ForEach-Object { $_.name }))) {
         if ($Job) { $Job.phase = "turning on $n" }
         try {
             $r = Enable-InstalledMod -Name $n -Ask:(Test-AskOverwrite)
@@ -233,7 +235,7 @@ function Invoke-ModPack($Pack, [string[]]$UsePack, $Job, [switch]$Start) {
         }
         catch { $notes.Add("$n not turned on: $($_.Exception.Message)") }
     }
-    $q = Add-QueueItems (@($plan.new) + @($plan.versions | Where-Object { $UsePack -contains $_.name })) "Modpack$(if ($Pack.name) { ": $($Pack.name)" })"
+    $q = Add-QueueItems ($new + @($plan.versions | Where-Object { $UsePack -contains $_.name })) "Modpack$(if ($Pack.name) { ": $($Pack.name)" })"
     $msg = "$($q.added) download(s) queued"
     if ($q.added -and $Start -and (Open-NextQueue)) { $msg += ', the first Nexus page is open' }
     if ($on) { $msg += "; $on mod(s) turned back on" }

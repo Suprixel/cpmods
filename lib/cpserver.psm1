@@ -113,7 +113,7 @@ Use-Lock { Invoke-Profile "$($P.name)" $Job }
 '@
     pack        = @'
 param($Job, $P, $Shared)
-try { Use-Lock { Invoke-ModPack $P.pack @($P.use) $Job -Start } }
+try { Use-Lock { Invoke-ModPack $P.pack @($P.use) $Job -Start -Files $P.files -TurnOn $P.on } }
 finally { $Shared.cache.Remove('fwupdates') }
 '@
     # the new version swaps in once this server has quit, then opens again
@@ -545,7 +545,11 @@ function Invoke-CpRequest {
                     'plan' { Send-Json $Ctx (Get-PackPlan (Read-ModPack "$($b.code)" $b.list)) }
                     'apply' {
                         $pk = Read-ModPack "$($b.code)" $b.list
-                        $j = Start-CpJob $Shared 'pack' "Getting the modpack$(if ($pk.name) { " $($pk.name)" })" @{ pack = $pk; use = @($b.use | ForEach-Object { "$_" }) }
+                        $jp = @{ pack = $pk; use = @($b.use | ForEach-Object { "$_" }) }
+                        # what was ticked; assigned, not piped, so an empty pick stays empty instead of meaning all
+                        if ($null -ne $b.files) { $jp.files = [int[]]@($b.files) }
+                        if ($null -ne $b.on) { $jp.on = [string[]]@($b.on) }
+                        $j = Start-CpJob $Shared 'pack' "Getting the modpack$(if ($pk.name) { " $($pk.name)" })" $jp
                         Send-Json $Ctx @{ ok = $true; job = $j.id }
                     }
                     default { throw "Unknown op $($b.op)" }

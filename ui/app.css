@@ -825,6 +825,44 @@ input.hex-in { width: 100px; font: 13px "Cascadia Mono", Consolas, monospace; }
 .cf-owner > b { color: var(--text); }
 .cf-files { margin: 4px 0 0; padding-left: 18px; }
 
+/* modpack picker: list or cards, dependencies under the mods that need them */
+.modal-card.pack { width: min(960px, 100%); display: flex; flex-direction: column; overflow: hidden; }
+.pk-head { display: flex; align-items: flex-start; justify-content: space-between; gap: 12px; }
+.pk-head p { margin: 0; }
+.pk-bar { margin: 12px 0 10px; padding: 10px 14px; }
+.pk-scroll { flex: 1; min-height: 0; overflow-y: auto; margin: 0 -20px; padding: 2px 20px 4px; }
+.pk-list { border: 1px solid var(--line); border-radius: var(--r); background: var(--card-bg); overflow: hidden; }
+.pk-row { display: flex; align-items: center; gap: 12px; min-width: 0; padding: 9px 14px; border-top: 1px solid var(--line); cursor: pointer; }
+.pk-row:first-child { border-top: 0; }
+.pk-row:hover { background: var(--hover); }
+.pk-row.dep { padding-left: 24px; border-top-style: dashed; background: rgba(var(--accent-rgb), .025); }
+.pk-row.miss { cursor: default; }
+.pk-row:not(.on):not(.miss) .pk-thumb, .pk-row:not(.on):not(.miss) .li-title .t { opacity: .5; }
+.pk-arrow { display: inline-grid; flex: none; color: var(--text3); }
+.pk-arrow svg { width: 16px; height: 16px; }
+.pk-thumb { width: 72px; aspect-ratio: 16 / 9; flex: none; border-radius: 6px; object-fit: cover; background: var(--img-bg); }
+.pk-row.dep .pk-thumb { width: 56px; }
+.pk-tiles { display: grid; grid-template-columns: repeat(auto-fill, minmax(200px, 1fr)); gap: 12px; }
+.pk-tile { cursor: default; }
+.pk-tile:hover { transform: none; }
+.pk-tile.on { border-color: var(--accent-sel); box-shadow: 0 0 0 1px var(--accent-sel); }
+.pk-tile:not(.on) .tile-img img, .pk-tile:not(.on) .tile-title { opacity: .5; }
+.pk-tile-main { display: flex; flex: 1; flex-direction: column; cursor: pointer; }
+.pk-tile .tile-flags .check { width: 18px; height: 18px; border-radius: 4px; box-shadow: 0 0 0 3px rgba(0, 0, 0, .5); }
+.pk-deps { display: flex; flex-direction: column; gap: 2px; padding: 6px 12px 9px; border-top: 1px dashed var(--line2); }
+.pk-deps-h { display: flex; align-items: center; gap: 6px; color: var(--text3); font-size: 11px; font-weight: 650; letter-spacing: .05em; text-transform: uppercase; }
+.pk-deps-h svg { width: 14px; height: 14px; }
+.pk-dep { display: flex; align-items: flex-start; gap: 7px; min-width: 0; padding: 3px 0 3px 4px; font-size: 12.5px; line-height: 1.35; cursor: pointer; }
+.pk-dep .check { margin-top: 1px; }
+.pk-dep .t { flex: 1; min-width: 0; overflow-wrap: anywhere; }
+.pk-dep small { display: block; color: var(--text3); font-size: 11px; }
+.pk-dep:not(.on):not(.miss) .t { opacity: .55; }
+.pk-dep.miss { color: var(--warn); cursor: default; }
+.pk-dep > svg { width: 14px; height: 14px; flex: none; margin-top: 1px; }
+.pk-dep.miss small, .pk-dep.warn-t small { color: inherit; }
+.pk-dep a { font-size: 12px; }
+.pk-more { margin-top: 12px; }
+
 /* key bindings */
 .key-row { align-items: flex-start; }
 .keycap { display: inline-flex; align-items: center; justify-content: center; min-width: 48px; height: 30px; padding: 0 9px; flex: none; border: 1px solid var(--line3); border-bottom-width: 3px; border-radius: 7px; background: var(--raised); color: var(--text); font: 600 12.5px/1 var(--display); white-space: nowrap; }

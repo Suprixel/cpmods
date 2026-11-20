@@ -1,7 +1,7 @@
 # cpmods core: game state, tracked install/remove, frameworks, Nexus API
 $ErrorActionPreference = 'Stop'
 
-$script:AppVersion = '1.10.0'
+$script:AppVersion = '1.11.0'
 # App: the program files. Root: the data (config, state, downloads, backups). They share a folder in a git or older copy
 # (config.json beside the program); an installed copy keeps data in %LOCALAPPDATA%\cpmods, so an update can swap the app folder whole
 $script:App = Split-Path -Parent $PSScriptRoot
@@ -1459,7 +1459,27 @@ function Read-ModPack([string]$Code, $List) {
     [ordered]@{ name = $(if ($pn.Length -gt 60) { $pn.Substring(0, 60) } else { $pn }); game = "$($List.game)"; mods = @($mods) }
 }
 
-# Names, file names and versions of pack entries from Nexus (one request per 40 mods). Two files of one mod are
+# Nexus mods with their files (one request per 40 mods): meta = modId -> name, summary, picture, requirements; files = modId -> files
+function Get-NexusModFiles([int[]]$Ids) {
+    $meta = @{}; $files = @{}
+    $Ids = @($Ids | Where-Object { $_ -gt 0 } | Sort-Object -Unique)
+    for ($i = 0; $i -lt $Ids.Count; $i += 40) {
+        $chunk = $Ids[$i..([Math]::Min($i + 39, $Ids.Count - 1))]
+        $list = ($chunk | ForEach-Object { "{gameDomain: `"$($script:NexusGame)`", modId: $_}" }) -join ', '
+        $q = "{ legacyModsByDomain(ids: [$list], count: 50) { nodes { modId name summary thumbnailUrl modRequirements { nexusRequirements { nodes { modId notes externalRequirement } } } } } " + (($chunk | ForEach-Object { "m$($_): modFiles(modId: $_, gameId: 3333) { fileId name version category }" }) -join ' ') + ' }'
+        $d = try { Invoke-NexusGql $q } catch { throw "Nexus did not answer, try again in a moment ($($_.Exception.Message))" }
+        foreach ($n in @($d.legacyModsByDomain.nodes)) { if ($n) { $meta[[int]$n.modId] = $n } }
+        foreach ($id in $chunk) { $files[$id] = @($d."m$id" | Where-Object { $_ }) }
+    }
+    @{ meta = $meta; files = $files }
+}
+
+# Nexus mods a mod needs: not external, not marked optional (same rule as the compatibility check), not a framework
+function Get-ModNeeds($Node, [int[]]$Skip) {
+    @(@($Node.modRequirements.nexusRequirements.nodes) | Where-Object { $_ -and -not $_.externalRequirement -and [int]$_.modId -gt 0 -and $Skip -notcontains [int]$_.modId -and "$($_.notes)" -notmatch '(?i)optional|only (if|for|needed|required)|not required|recommended' } | ForEach-Object { [int]$_.modId } | Sort-Object -Unique)
+}
+
+# Names, file names and versions of pack entries from Nexus, with what each mod needs. Two files of one mod are
 # named "Mod - File", like a second download of a mod. Files Nexus no longer has come back in gone.
 function Resolve-PackMods($Mods) {
     # entries without a mod id (short codes): Nexus finds each file's mod (uid = game id << 32 | file id, 50 per request)
@@ -1472,21 +1492,15 @@ function Resolve-PackMods($Mods) {
         # a file Nexus does not know keeps 0 and is reported as gone
         foreach ($e in $chunk) { $e.modId = [int]$owner[[long]$e.fileId] }
     }
-    $ids = @($Mods | ForEach-Object { [int]$_.modId } | Where-Object { $_ -gt 0 } | Sort-Object -Unique)
-    $names = @{}; $files = @{}
-    for ($i = 0; $i -lt $ids.Count; $i += 40) {
-        $chunk = $ids[$i..([Math]::Min($i + 39, $ids.Count - 1))]
-        $list = ($chunk | ForEach-Object { "{gameDomain: `"$($script:NexusGame)`", modId: $_}" }) -join ', '
-        $q = "{ legacyModsByDomain(ids: [$list], count: 50) { nodes { modId name } } " + (($chunk | ForEach-Object { "m$($_): modFiles(modId: $_, gameId: 3333) { fileId name version category }" }) -join ' ') + ' }'
-        $d = try { Invoke-NexusGql $q } catch { throw "Nexus did not answer, try again in a moment ($($_.Exception.Message))" }
-        foreach ($n in @($d.legacyModsByDomain.nodes)) { if ($n) { $names[[int]$n.modId] = "$($n.name)" } }
-        foreach ($id in $chunk) { foreach ($f in @($d."m$id")) { if ($f) { $files[[int]$f.fileId] = $f } } }
-    }
+    $nx = Get-NexusModFiles @($Mods | ForEach-Object { [int]$_.modId })
+    $files = @{}; foreach ($l in $nx.files.Values) { foreach ($f in $l) { $files[[int]$f.fileId] = $f } }
+    $fw = @(Get-Frameworks | ForEach-Object { [int]$_.nexusId })
     $ok = [Collections.Generic.List[object]]::new(); $gone = [Collections.Generic.List[string]]::new()
     foreach ($e in $Mods) {
-        $f = $files[[int]$e.fileId]; $mn = $names[[int]$e.modId]
+        $f = $files[[int]$e.fileId]; $n = $nx.meta[[int]$e.modId]; $mn = if ($n) { "$($n.name)" }
         if (-not $f -or -not $mn -or $f.category -eq 'REMOVED') { $gone.Add($(if ($mn) { "$mn (file $($e.fileId))" } elseif ($e.modId) { "Nexus mod $($e.modId)" } else { "Nexus file $($e.fileId)" })); continue }
-        $ok.Add([ordered]@{ name = $mn; modId = [int]$e.modId; fileId = [int]$e.fileId; version = "$($f.version)"; fileName = "$($f.name)"; sub = $e.sub })
+        $ok.Add([ordered]@{ name = $mn; modId = [int]$e.modId; fileId = [int]$e.fileId; version = "$($f.version)"; fileName = "$($f.name)"; sub = $e.sub
+                thumb = "$($n.thumbnailUrl)"; summary = "$($n.summary)"; needs = @(Get-ModNeeds $n $fw) })
     }
     foreach ($g in @($ok | Group-Object { $_.modId } | Where-Object Count -gt 1)) { foreach ($e in $g.Group) { $e.name = "$($e.name) - $($e.fileName)" } }
     @{ mods = @($ok); gone = @($gone) }
@@ -1499,25 +1513,47 @@ function Get-PackPlan($Pack) {
     $local = @(@($s.mods | ForEach-Object { @{ m = $_; on = $true } }) + @($s.disabled | ForEach-Object { @{ m = $_; on = $false } }))
     $names = @($local | ForEach-Object { "$($_.m.name)" })
     $res = Resolve-PackMods $Pack.mods
-    $plan = [ordered]@{ name = $Pack.name; game = $Pack.game; total = @($Pack.mods).Count; new = @(); have = @(); turnOn = @(); versions = @(); gone = $res.gone
+    $plan = [ordered]@{ name = $Pack.name; game = $Pack.game; total = @($Pack.mods).Count; new = @(); have = @(); turnOn = @(); versions = @(); gone = $res.gone; missing = @()
         frameworks = @(Get-Frameworks | Where-Object { $names -notcontains $_.name } | ForEach-Object { "$($_.name)" })
     }
     $used = @{}
     foreach ($e in $res.mods) {
         $hit = $local | Where-Object { [int]$_.m.fileId -eq $e.fileId } | Select-Object -First 1
-        if ($hit) { $used[$hit.m.name] = $true; if ($hit.on) { $plan.have += $hit.m.name } else { $plan.turnOn += $hit.m.name }; continue }
+        if ($hit) { $used[$hit.m.name] = $true; if ($hit.on) { $plan.have += $hit.m.name } else { $e.name = $hit.m.name; $plan.turnOn += $e }; continue }
         # one mod's files share its name (main, optional...): with file names on both sides only they decide
         $hit = $local | Where-Object { [int]$_.m.modId -eq $e.modId -and -not $used[$_.m.name] -and $(if ($e.fileName -and $_.m.fileName) { (Get-NormName $_.m.fileName) -eq (Get-NormName $e.fileName) } else { $_.m.name -eq $e.name }) } | Select-Object -First 1
         if ($hit) {
             $m = $hit.m; $used[$m.name] = $true
             # queued under your name, so the download replaces your version instead of landing beside it
-            $plan.versions += [ordered]@{ name = $m.name; mine = "$($m.version)"; pack = $e.version; newer = [bool]($m.fileId -and $e.fileId -gt [int]$m.fileId); older = [bool]($m.fileId -and $e.fileId -lt [int]$m.fileId); on = $hit.on; back = [bool]($m.archive -and (Test-Path -LiteralPath $m.archive)); modId = $e.modId; fileId = $e.fileId; sub = $e.sub }
+            $plan.versions += [ordered]@{ name = $m.name; mine = "$($m.version)"; pack = $e.version; newer = [bool]($m.fileId -and $e.fileId -gt [int]$m.fileId); older = [bool]($m.fileId -and $e.fileId -lt [int]$m.fileId); on = $hit.on; back = [bool]($m.archive -and (Test-Path -LiteralPath $m.archive)); modId = $e.modId; fileId = $e.fileId; sub = $e.sub
+                thumb = $e.thumb; summary = $e.summary; needs = $e.needs }
             continue
         }
         # another mod here (or earlier in the pack) has the same name: a distinct name keeps the install from replacing it
         if ($names -contains $e.name) { $e.name = "$($e.name) ($($e.modId))" }
         $names += $e.name
         $plan.new += $e
+    }
+    # mods the pack's mods need that are neither on here nor in the pack: one of yours turned off comes back on,
+    # a Nexus mod with a single main file is downloaded (extra), others are listed as missing
+    # shortcut: what those extra mods need in turn is not looked up, deeper chains show on the Compatibility page
+    $known = @(@($s.mods | ForEach-Object { [int]$_.modId }) + @($res.mods | ForEach-Object { $_.modId }))
+    $want = @(@($plan.new) + @($plan.turnOn) + @($plan.versions) | ForEach-Object { $_.needs } | Where-Object { $known -notcontains $_ } | Sort-Object -Unique)
+    if ($want) {
+        $nx = Get-NexusModFiles $want
+        foreach ($id in $want) {
+            $n = $nx.meta[$id]; $mn = if ($n) { "$($n.name)" } else { "Nexus mod $id" }
+            $x = [ordered]@{ name = $mn; modId = $id; thumb = "$($n.thumbnailUrl)"; summary = "$($n.summary)"; needs = @(); extra = $true }
+            $off = @($s.disabled | Where-Object { [int]$_.modId -eq $id } | Select-Object -First 1)
+            $main = @($nx.files[$id] | Where-Object category -eq 'MAIN')
+            if ($off) { $x.name = $off[0].name; $x.fileId = [int]$off[0].fileId; $x.version = "$($off[0].version)"; $plan.turnOn += $x }
+            elseif ($n -and $main.Count -eq 1) {
+                $x.fileId = [int]$main[0].fileId; $x.version = "$($main[0].version)"; $x.fileName = "$($main[0].name)"
+                if ($names -contains $x.name) { $x.name = "$($x.name) ($id)" }
+                $names += $x.name; $plan.new += $x
+            }
+            else { $plan.missing += [ordered]@{ modId = $id; name = $mn; why = $(if (-not $n) { 'Not in the modpack and not on Nexus any more' } elseif ($main.Count) { 'Not in the modpack, and it has several main files: pick the one you need on Nexus' } else { 'Not in the modpack, and Nexus has no main file for it' }) } }
+        }
     }
     $plan
 }

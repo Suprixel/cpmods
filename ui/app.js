@@ -111,6 +111,7 @@
     save: '<path d="M5 4h11.5L20 7.5V20H5z"/><path d="M8.5 4v4.5h6.5V4M8.5 20v-6h7v6"/>',
     undo: '<path d="M9 6 4 11l5 5"/><path d="M4 11h9.5a5.5 5.5 0 0 1 0 11H11"/>',
     pin: '<path d="M7 3.5h10v17l-5-4-5 4z"/>',
+    dep: '<path d="M6 4v7a4 4 0 0 0 4 4h9"/><path d="m15 11 4 4-4 4"/>',
   };
   const FILLED = new Set(['more', 'play', 'stop']);
   const ic = n => `<svg class="i" viewBox="0 0 24 24" fill="${FILLED.has(n) ? 'currentColor' : 'none'}" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">${ICONS[n] || ''}</svg>`;
@@ -149,7 +150,7 @@
   function savePrefs() {
     const pick = (o, ks) => ks.reduce((a, k) => { a[k] = o[k]; return a; }, {});
     prefsBody = JSON.stringify({
-      page: S.page, paneW: prefs.paneW || undefined, reqMissingOnly: prefs.reqMissingOnly || undefined, sideMin: prefs.sideMin || undefined, explain: prefs.explain === true ? true : undefined, flowHelp: prefs.flowHelp || undefined,
+      page: S.page, paneW: prefs.paneW || undefined, reqMissingOnly: prefs.reqMissingOnly || undefined, sideMin: prefs.sideMin || undefined, explain: prefs.explain === true ? true : undefined, flowHelp: prefs.flowHelp || undefined, packView: prefs.packView || undefined,
       b: pick(S.b, ['sort', 'cat', 'tag', 'compat', 'hideTr', 'hideAdult', 'hideCheats', 'hideCosmetic', 'view']), c: pick(S.c, ['sort', 'cat', 'only', 'adult']),
       lib: pick(S.lib, ['sort', 'kind', 'src', 'view']), dl: pick(S.dl, ['arch', 'sort', 'jobs']),
       theme: prefs.theme && prefs.theme !== 'yellow' ? prefs.theme : undefined, custom: prefs.custom || undefined, themeVars: prefs.themeVars || undefined,
@@ -2785,40 +2786,127 @@
           <div class="toolbar" style="margin-top:10px"><button class="btn sm ghost" data-act="modlist-export">Save as a file instead</button></div></div></div>`;
     });
   }
-  // src: { code } or { list } (a mod list file). Shows what changes, asks about other versions, then gets the mods
+  // src: { code } or { list } (a mod list file). Shows what changes, lets you tick the mods to get, then gets them
   async function packFlow(src) {
     let pl;
     toast('Reading the modpack', 'Looking up its mods on Nexus.', '', 2500);
     try { pl = await api('/api/pack', Object.assign({ op: 'plan' }, src)); }
     catch (e) { toast('Could not read the modpack', e.message, 'bad', 10000); return; }
-    const nw = arr(pl.new), on = arr(pl.turnOn), v = arr(pl.versions), fw = arr(pl.frameworks), have = arr(pl.have), gone = arr(pl.gone);
-    if (!nw.length && !on.length && !v.length && !fw.length) { toast('Nothing to get', gone.length ? `You have the rest; ${plural(gone.length, 'mod')} of it no longer on Nexus.` : `You already have all ${plural(pl.total, 'mod')} of this modpack.`, 'ok', 6000); return; }
+    const gone = arr(pl.gone);
+    if (!arr(pl.new).length && !arr(pl.turnOn).length && !arr(pl.versions).length && !arr(pl.frameworks).length) { toast('Nothing to get', gone.length ? `You have the rest; ${plural(gone.length, 'mod')} of it no longer on Nexus.` : `You already have all ${plural(pl.total, 'mod')} of this modpack.`, 'ok', 6000); return; }
     if (S.st.game.running) { toast('Close the game first', 'Mods cannot change while it runs.', 'warn', 5000); return; }
-    // other versions: by default yours is updated where the pack has a newer file, never downgraded
-    const up = v.filter(x => x.newer), many = v.length > 1;
-    const vrows = v.length ? `<div class="bk-grp"><b>You have another version (${v.length})</b><div class="list">${v.map(x => `<label class="li check-row">${many ? `<input type="checkbox" class="check" data-pick="${h(x.name)}"${x.newer ? ' checked' : ''}>` : ''}<div class="li-main"><div class="li-title"><span class="t">${h(x.name)}</span>${x.newer ? '<span class="pill ok">newer in the pack</span>' : x.older ? '<span class="pill">older in the pack</span>' : ''}${x.on ? '' : '<span class="pill">off</span>'}</div><div class="li-sub"><span>yours ${h(x.mine || '?')}, the pack's ${h(x.pack || '?')}</span>${x.back ? '' : '<span class="bad-t">yours has no download left: replacing it cannot be undone</span>'}</div></div></label>`).join('')}</div></div>` : '';
-    const body = (pl.game ? `<p class="dim small" style="margin-top:0">Made with game version ${h(pl.game)}.</p>` : '')
-      + planGrp(`Downloaded (${nw.length})`, nw.map(m => m.name)) + planGrp('Turned back on', on) + planGrp('Frameworks installed', fw) + vrows
-      + planGrp(`No longer on Nexus, skipped (${gone.length})`, gone, 'bad-t')
-      + `<p class="dim small">${have.length ? `You already have ${plural(have.length, 'mod')} of it. ` : ''}Before anything changes, cpmods makes a restore point and a backup of your mod settings (Library, Backups), and it keeps the downloads of replaced versions, so you can go back. Each download needs one "Slow download" click on Nexus; the next page opens by itself.</p>`;
-    const options = [];
-    if (!v.length) options.push({ v: 'keep', label: 'Get the modpack', desc: [plural(nw.length, 'download'), on.length ? `${on.length} turned back on` : '', fw.length ? plural(fw.length, 'framework') : ''].filter(Boolean).join(', ') + '.' });
-    else {
-      if (up.length) options.push({ v: 'update', label: 'Update my mods', kind: 'primary', desc: `The pack's newer version for ${plural(up.length, 'mod')}.${up.length < v.length ? ` Where yours is newer (${v.length - up.length}), yours stays.` : ''}` });
-      options.push({ v: 'keep', label: many ? 'Keep my versions' : 'Keep my version', kind: up.length ? '' : 'primary', desc: many ? 'None of yours is replaced.' : 'Yours stays as it is.' });
-      if (up.length < v.length) options.push({ v: 'pack', label: many ? 'Use the pack\'s versions' : 'Use the pack\'s version', desc: 'Also where the pack has an older version than yours.' });
-      if (many) options.push({ v: 'picked', label: 'Only the ticked mods', desc: 'The ticked mods above get the pack\'s version; the others keep yours.' });
-    }
-    const r = await choose({ title: pl.name ? `Get the modpack ${pl.name}?` : 'Get this modpack?', body, options });
+    const r = await packPick(pl);
     if (!r) return;
-    const use = r.v === 'update' ? up.map(x => x.name) : r.v === 'pack' ? v.map(x => x.name) : r.v === 'picked' ? r.picked : [];
-    if (!nw.length && !on.length && !fw.length && !use.length) { toast('Nothing changes', 'You kept your versions and already have the rest.', 'ok', 6000); return; }
     try {
-      await api('/api/pack', Object.assign({ op: 'apply', use }, src));
+      await api('/api/pack', Object.assign({ op: 'apply' }, r, src));
       toast('Getting the modpack', 'Progress shows in the bar at the bottom.', '', 5000);
       await refreshState();
       if (S.pane && S.pane.kind === 'packs') renderPane();
     } catch (e) { toast('Could not get the modpack', e.message, 'bad', 10000); }
+  }
+  // modpack picker, as a list or as cards: tick the mods to get; ticking one ticks the mods it needs, shown under it.
+  // Resolves { files, on, use } (new file ids, your mods to turn back on, yours that take the pack's version) or null
+  function packPick(pl) {
+    const fw = arr(pl.frameworks), gone = arr(pl.gone), have = arr(pl.have), inst = new Set(stMods().map(m => +m.modId));
+    const items = [...arr(pl.new).map(m => ({ kind: 'new', m, sel: true })), ...arr(pl.turnOn).map(m => ({ kind: 'on', m, sel: true })), ...arr(pl.versions).map(m => ({ kind: 'ver', m, sel: !!m.newer }))];
+    // a mod's dependencies among the others (a version you keep stays installed, so it is never one)
+    const byMod = {};
+    items.forEach((it, i) => { it.i = i; if (it.kind !== 'ver') (byMod[it.m.modId] = byMod[it.m.modId] || []).push(it); });
+    items.forEach(it => {
+      const needs = arr(it.m.needs).map(Number).filter(id => !inst.has(id));
+      it.req = needs.flatMap(id => byMod[id] || []).filter(d => d !== it);
+      it.miss = arr(pl.missing).filter(x => needs.includes(+x.modId));
+    });
+    items.forEach(it => { const out = new Set(), walk = x => x.req.forEach(d => { if (d !== it && !out.has(d)) { out.add(d); walk(d); } }); walk(it); it.deps = [...out]; });
+    // top level: mods nothing else needs; mods that need each other start from the first one
+    const needed = new Set(items.flatMap(it => it.req)), roots = items.filter(it => !needed.has(it)), placed = new Set(roots.flatMap(r => [r, ...r.deps]));
+    items.forEach(it => { if (!placed.has(it)) { roots.push(it); [it, ...it.deps].forEach(x => placed.add(x)); } });
+    const unmet = it => !it.sel && items.some(x => x.sel && x.req.includes(it));
+    const names = l => l.slice(0, 3).map(x => x.m.name).join(', ') + (l.length > 3 ? ` and ${l.length - 3} more` : '');
+    const missOf = r => { const seen = new Set(); return [r, ...r.deps].flatMap(x => x.miss).filter(x => !seen.has(x.modId) && seen.add(x.modId)); };
+    const pic = m => perf().pics !== 'off' && m.thumb ? m.thumb : '';
+    const pill = it => it.kind === 'on' ? '<span class="pill">Turned back on</span>' : it.kind === 'ver' ? (it.m.newer ? '<span class="pill ok">Newer in the pack</span>' : it.m.older ? '<span class="pill">Older in the pack</span>' : '')
+      : it.m.extra ? '<span class="pill warn" title="A mod of the pack needs it, but the code does not list it">Not in the modpack</span>' : '';
+    const what = (it, brief) => {
+      const m = it.m;
+      if (it.kind === 'on') return 'You have it, turned off';
+      if (it.kind !== 'ver') return [brief && m.version ? 'v' + m.version : '', m.fileName].filter(Boolean).join(' · ');
+      return `Yours ${m.mine || '?'}${m.on ? '' : ' (off, comes back on)'}, the pack's ${m.pack || '?'}` + (brief ? '' : `. Ticked: the pack's version replaces yours${m.back ? '' : ', and yours has no download left to go back to'}`);
+    };
+    const nexus = x => `<a href="${NEXUS}/mods/${+x.modId}" target="_blank" rel="noopener">Nexus</a>`;
+    const row = (it, top) => {
+      const m = it.m, img = pic(m), by = top ? [] : items.filter(x => x.req.includes(it));
+      return `<label class="pk-row${top ? '' : ' dep'}${it.sel ? ' on' : ''}">${top ? '' : `<span class="pk-arrow">${ic('dep')}</span>`}<input type="checkbox" class="check" data-pk="${it.i}"${it.sel ? ' checked' : ''} aria-label="${h(m.name)}">`
+        + (perf().pics === 'off' ? '' : img ? `<img class="pk-thumb" ${IMG.attr(img)} alt="">` : '<span class="pk-thumb"></span>')
+        + `<div class="li-main"><div class="li-title"><span class="t">${h(m.name)}</span>${m.version ? `<span class="ver">${h(m.version)}</span>` : ''}${top ? '' : '<span class="pill info">Dependency</span>'}${pill(it)}</div>
+        <div class="li-sub">${what(it) ? `<span>${h(what(it))}</span>` : ''}${by.length ? `<span data-pkw="${it.i}">Needed by ${h(names(by))}</span>` : ''}</div></div></label>`;
+    };
+    const missRow = x => `<div class="pk-row dep miss"><span class="pk-arrow">${ic('dep')}</span><span class="st-ic warn">${ic('alert')}</span><div class="li-main"><div class="li-title"><span class="t">${h(x.name)}</span><span class="pill warn">Dependency, not included</span></div><div class="li-sub"><span>${h(x.why)}</span>${nexus(x)}</div></div></div>`;
+    const card = r => {
+      const m = r.m, img = pic(m), miss = missOf(r), sub = what(r, true);
+      return `<div class="tile pk-tile${r.sel ? ' on' : ''}"><label class="pk-tile-main">
+        <div class="tile-img">${img ? `<img ${IMG.attr(img)} alt="">` : `<div class="noimg">${perf().pics === 'off' ? '' : 'No image'}</div>`}<div class="tile-flags"><input type="checkbox" class="check" data-pk="${r.i}"${r.sel ? ' checked' : ''} aria-label="${h(m.name)}">${pill(r)}</div></div>
+        <div class="tile-body"><div class="tile-title">${h(m.name)}</div>${sub ? `<div class="tile-meta" title="${h(what(r))}">${h(sub)}</div>` : ''}${m.summary ? `<p class="tile-sum">${h(stripBB(m.summary))}</p>` : ''}</div></label>`
+        + (r.deps.length || miss.length ? `<div class="pk-deps"><div class="pk-deps-h">${ic('dep')}${plural(r.deps.length + miss.length, 'dependency', 'dependencies')}</div>`
+          + r.deps.map(d => `<label class="pk-dep${d.sel ? ' on' : ''}" data-pkw="${d.i}" title="${h(what(d))}"><input type="checkbox" class="check" data-pk="${d.i}"${d.sel ? ' checked' : ''} aria-label="${h(d.m.name)}"><span class="t">${h(d.m.name)}${d.m.extra ? `<small>${d.kind === 'on' ? 'yours, turned back on' : 'not in the modpack'}</small>` : ''}</span></label>`).join('')
+          + miss.map(x => `<div class="pk-dep miss" title="${h(x.why)}">${ic('alert')}<span class="t">${h(x.name)}<small>not included</small></span>${nexus(x)}</div>`).join('') + '</div>' : '') + '</div>';
+    };
+    const cards = () => prefs.packView === 'cards';
+    const body = () => (!items.length ? '<p class="dim">You have every mod of it already.</p>'
+      : cards() ? `<div class="pk-tiles">${roots.map(card).join('')}</div>`
+        : `<div class="pk-list">${roots.map(r => row(r, true) + r.deps.map(d => row(d, false)).join('') + missOf(r).map(missRow).join('')).join('')}</div>`)
+      + `<div class="pk-more">${planGrp('Frameworks installed', fw)}${planGrp(`No longer on Nexus, skipped (${gone.length})`, gone, 'bad-t')}<p class="dim small">${have.length ? `You already have ${plural(have.length, 'mod')} of it. ` : ''}Before anything changes, cpmods makes a restore point and a backup of your mod settings (Library, Backups), and it keeps the downloads of replaced versions, so you can go back. Each download needs one "Slow download" click on Nexus; the next page opens by itself.</p></div>`;
+    const views = () => [['list', 'list', 'List', 'One mod per line'], ['cards', 'grid', 'Cards', 'Cards with pictures']].map(([v, i, l, t]) => { const on = (cards() ? 'cards' : 'list') === v; return `<button data-pkv="${v}" class="${on ? 'on' : ''}" aria-pressed="${on}" title="${t}">${ic(i)}<span>${l}</span></button>`; }).join('');
+    const summary = () => {
+      const s = items.filter(x => x.sel), c = k => s.filter(x => x.kind === k).length;
+      const parts = [c('new') ? plural(c('new'), 'download') : '', c('on') ? `${c('on')} turned back on` : '', c('ver') ? `${c('ver')} replaced by the pack's version` : '', fw.length ? plural(fw.length, 'framework') : ''].filter(Boolean);
+      return `<b>${s.length} of ${plural(items.length, 'mod')} ticked</b><span>${parts.length ? h(parts.join(', ')) + '.' : 'Nothing ticked.'} Ticking a mod also ticks the mods it needs.</span>`;
+    };
+    return new Promise(res => {
+      const m = $('#modal'), title = pl.name ? `Get the modpack ${pl.name}?` : 'Get this modpack?';
+      m.innerHTML = `<div class="modal-card pack" role="dialog" aria-modal="true" aria-labelledby="m-title">
+        <div class="pk-head"><div><h3 id="m-title">${h(title)}</h3>${pl.game ? `<p class="dim small">Made with game version ${h(pl.game)}.</p>` : ''}</div><div class="seg icons" role="group" aria-label="Layout" id="pk-views">${views()}</div></div>
+        <div class="action-card pk-bar"><div class="action-row">${items.length ? '<label class="check-row" style="flex:none" title="Tick all"><input type="checkbox" class="check" id="pk-all" aria-label="Tick all"></label>' : ''}<div class="action-file" id="pk-sum"></div></div></div>
+        <div class="pk-scroll" id="pk-body">${body()}</div>
+        <div class="modal-actions"><button class="btn ghost" data-m="">Cancel</button><span class="spacer"></span><button class="btn primary" data-m="go" id="pk-go"></button></div></div>`;
+      m.hidden = false;
+      const update = () => {
+        const n = items.filter(x => x.sel).length, all = $('#pk-all'), go = $('#pk-go');
+        m.querySelectorAll('[data-pk]').forEach(c => { const it = items[+c.dataset.pk], box = c.closest('.pk-dep, .pk-row, .pk-tile'); c.checked = it.sel; if (box) box.classList.toggle('on', it.sel); });
+        m.querySelectorAll('[data-pkw]').forEach(e => { const it = items[+e.dataset.pkw], bad = unmet(it); e.classList.toggle('warn-t', bad); if (e.matches('.pk-dep')) e.title = bad ? `Unticked, but ${names(items.filter(x => x.sel && x.req.includes(it)))} needs it` : what(it); });
+        $('#pk-sum').innerHTML = summary();
+        if (all) { all.checked = n === items.length; all.indeterminate = n > 0 && n < items.length; }
+        go.textContent = n ? `Get ${plural(n, 'mod')}` : fw.length ? 'Install the frameworks' : 'Get the mods';
+        go.disabled = !n && !fw.length;
+      };
+      // ticking a mod ticks what it needs; unticking it unticks what no other ticked mod needs
+      const pick = (it, on) => {
+        it.sel = on;
+        if (on) it.deps.forEach(d => { d.sel = true; });
+        else it.deps.forEach(d => { if (!roots.some(r => r !== it && r.sel && r.deps.includes(d))) d.sel = false; });
+      };
+      const done = v => {
+        m.hidden = true; m.innerHTML = ''; document.removeEventListener('keydown', kd, true); m.onclick = null; m.onchange = null;
+        const s = items.filter(x => x.sel);
+        res(v ? { files: s.filter(x => x.kind === 'new').map(x => +x.m.fileId), on: s.filter(x => x.kind === 'on').map(x => x.m.name), use: s.filter(x => x.kind === 'ver').map(x => x.m.name) } : null);
+      };
+      const kd = e => { if (e.key === 'Escape') { e.preventDefault(); e.stopPropagation(); done(''); } };
+      document.addEventListener('keydown', kd, true);
+      m.onclick = e => {
+        const v = e.target.closest('[data-pkv]');
+        if (v) { prefs.packView = v.dataset.pkv; savePrefs(); $('#pk-views').innerHTML = views(); $('#pk-body').innerHTML = body(); update(); return; }
+        const b = e.target.closest('button[data-m]');
+        if (b) done(b.dataset.m); else if (e.target === m) done('');
+      };
+      m.onchange = e => {
+        const c = e.target;
+        if (c.id === 'pk-all') items.forEach(x => { x.sel = c.checked; });
+        else if (c.dataset.pk) pick(items[+c.dataset.pk], c.checked);
+        update();
+      };
+      update();
+      $('#pk-go').focus();
+    });
   }
   async function packMake() {
     const p = S.pane;

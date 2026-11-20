@@ -372,12 +372,18 @@ try {
         9010 = 'Lut', @(@{ fileId = 100; name = 'Lut main'; version = '1.0'; category = 'MAIN' }, @{ fileId = 101; name = 'Lut Neutral'; version = '1.0'; category = 'OPTIONAL' })
         9011 = 'Same Name', @(@{ fileId = 110; name = 'Main'; version = '1'; category = 'MAIN' })
         9012 = 'Same Name', @(@{ fileId = 120; name = 'Main'; version = '1'; category = 'MAIN' })
+        # third item: Nexus requirements
+        9020 = 'NeedsDep', @(@{ fileId = 200; name = 'NeedsDep main'; version = '1'; category = 'MAIN' }), @(@{ modId = 9021 }, @{ modId = 9022 }, @{ modId = 9023 }, @{ modId = 9025; notes = 'Optional, for the extra outfits' }, @{ modId = 9026 }, @{ modId = 0; externalRequirement = $true })
+        9021 = 'DepIn', @(@{ fileId = 210; name = 'DepIn'; version = '1'; category = 'MAIN' })
+        9022 = 'DepOne', @(@{ fileId = 219; name = 'DepOne'; version = '0.9'; category = 'OLD_VERSION' }, @{ fileId = 220; name = 'DepOne'; version = '1'; category = 'MAIN' })
+        9023 = 'DepTwo', @(@{ fileId = 230; name = 'A'; version = '1'; category = 'MAIN' }, @{ fileId = 231; name = 'B'; version = '1'; category = 'MAIN' })
+        9026 = 'DepOff', @(@{ fileId = 260; name = 'DepOff main'; version = '1.0'; category = 'MAIN' })
     }
     $origGql = & (Get-Module cpmods) { ${function:Invoke-NexusGql} }
     & (Get-Module cpmods) {
         param($f) $script:FakeNx = $f
         function script:Invoke-NexusGql([string]$Query) {
-            $d = @{ legacyModsByDomain = @{ nodes = @(foreach ($m in [regex]::Matches($Query, 'modId: (\d+)\}')) { $x = $script:FakeNx[[int]$m.Groups[1].Value]; if ($x) { @{ modId = [int]$m.Groups[1].Value; name = $x[0] } } }) } }
+            $d = @{ legacyModsByDomain = @{ nodes = @(foreach ($m in [regex]::Matches($Query, 'modId: (\d+)\}')) { $x = $script:FakeNx[[int]$m.Groups[1].Value]; if ($x) { @{ modId = [int]$m.Groups[1].Value; name = $x[0]; modRequirements = @{ nexusRequirements = @{ nodes = @($x[2]) } } } } }) } }
             foreach ($m in [regex]::Matches($Query, 'm(\d+): modFiles')) { $x = $script:FakeNx[[int]$m.Groups[1].Value]; $d["m$($m.Groups[1].Value)"] = $(if ($x) { $x[1] } else { @() }) }
             # file uid = game id << 32 | file id
             $d.modFilesByUid = @{ nodes = @(foreach ($m in [regex]::Matches($Query, '"(\d+)"')) {
@@ -392,12 +398,12 @@ try {
             @{ modId = 9006; fileId = 60 }, @{ modId = 9007; fileId = 70 }, @{ modId = 9008; fileId = 80 }, @{ modId = 9008; fileId = 81 }, @{ modId = 9009; fileId = 90 })
         $code = (ConvertTo-PackCode 'Friends' $fl).code
         $sp = Get-PackPlan (Read-ModPack (ConvertTo-PackCode 'Friends' $fl -Short).code)
-        $sig = { param($x) "$(@($x.have) -join ',')|$(@($x.turnOn) -join ',')|$(@($x.versions | ForEach-Object { "$($_.name)>$($_.fileId)" }) -join ',')|$(@($x.new | ForEach-Object { "$($_.name)>$($_.modId)/$($_.fileId)" } | Sort-Object) -join ',')" }
+        $sig = { param($x) "$(@($x.have) -join ',')|$(@($x.turnOn | ForEach-Object name) -join ',')|$(@($x.versions | ForEach-Object { "$($_.name)>$($_.fileId)" }) -join ',')|$(@($x.new | ForEach-Object { "$($_.name)>$($_.modId)/$($_.fileId)" } | Sort-Object) -join ',')" }
         '[{"name":"FwX","repo":"none/none","asset":"x"}]' | Set-Content "$Sb\frameworks.json"
         $pl = Get-PackPlan (Read-ModPack $code)
         '[]' | Set-Content "$Sb\frameworks.json"
         $vs = { param($n) $pl.versions | Where-Object name -eq $n }
-        Check ((@($pl.have) -join ',') -eq 'PackSame' -and (@($pl.turnOn) -join ',') -eq 'PackOff' -and (@($pl.versions | ForEach-Object name) -join ',') -eq 'PackOld,PackKeep' -and (@($pl.frameworks) -join ',') -eq 'FwX') "T28 plan: have, turn on, other versions, frameworks: $(ConvertTo-Json $pl -Compress -Depth 4)"
+        Check ((@($pl.have) -join ',') -eq 'PackSame' -and (@($pl.turnOn | ForEach-Object name) -join ',') -eq 'PackOff' -and (@($pl.versions | ForEach-Object name) -join ',') -eq 'PackOld,PackKeep' -and (@($pl.frameworks) -join ',') -eq 'FwX') "T28 plan: have, turn on, other versions, frameworks: $(ConvertTo-Json $pl -Compress -Depth 4)"
         Check ((& $vs 'PackOld').newer -and -not (& $vs 'PackOld').older -and (& $vs 'PackOld').pack -eq '2.0' -and (& $vs 'PackKeep').older -and -not (& $vs 'PackKeep').newer) 'T28 plan: the pack has PackOld newer, PackKeep older (matched by its file name)'
         Check ((@($pl.new | ForEach-Object name) -join ',') -eq 'Brand new,ModD (9006),Twin - Twin A,Twin - Twin B' -and ($pl.new | Where-Object fileId -eq 50).version -eq '3.1') "T28 plan: new mods named from Nexus, a clashing name kept apart, two files of one mod: $(($pl.new | ForEach-Object name) -join ', ')"
         Check ((@($pl.gone) -join ',') -eq 'Was removed (file 70),Nexus mod 9009') "T28 plan: removed and unknown files are skipped: $(@($pl.gone) -join ', ')"
@@ -414,6 +420,17 @@ try {
         & $nx 'Lut' 9010 100 '1.0' (New-TestMod 'Lut' @{ 'archive\pc\mod\lut.archive' = 'l' })
         $ep = Get-PackPlan (Read-ModPack (ConvertTo-PackCode 'Edge' @(@{ modId = 9010; fileId = 101 }, @{ modId = 9011; fileId = 110 }, @{ modId = 9012; fileId = 120 })).code)
         Check (-not @($ep.versions).Count -and (@($ep.new | ForEach-Object name) -join ',') -eq 'Lut (9010),Same Name,Same Name (9012)') "T28 optional file is new beside your main file; same-named mods get distinct names: $(($ep.new | ForEach-Object name) -join ', ')"
+        # dependencies: one in the pack, one more with a single main file (added), one with two (missing), an optional one (left out), one of yours turned off
+        & $nx 'DepOff' 9026 260 '1.0' (New-TestMod 'DepOff' @{ 'archive\pc\mod\depoff.archive' = 'd' }); Disable-InstalledMod 'DepOff'
+        $dcode = (ConvertTo-PackCode 'Deps' @(@{ modId = 9020; fileId = 200 }, @{ modId = 9021; fileId = 210 })).code
+        $dp = Get-PackPlan (Read-ModPack $dcode)
+        $top = $dp.new | Where-Object modId -eq 9020; $ex = $dp.new | Where-Object modId -eq 9022
+        Check ((@($top.needs) -join ',') -eq '9021,9022,9023,9026' -and $ex.extra -and $ex.fileId -eq 220 -and -not ($dp.new | Where-Object modId -eq 9021).extra) "T28 dependencies: what a mod needs (optional and external left out), one more mod added: $(ConvertTo-Json $dp.new -Compress -Depth 4)"
+        Check ((@($dp.missing | ForEach-Object modId) -join ',') -eq '9023' -and $dp.missing[0].why -match 'several main files' -and (@($dp.turnOn | Where-Object extra | ForEach-Object name) -join ',') -eq 'DepOff') "T28 dependencies: two main files is missing, yours turned off comes back on: $(ConvertTo-Json $dp.missing -Compress) / $(ConvertTo-Json $dp.turnOn -Compress -Depth 4)"
+        $q0 = @(Get-Queue | Where-Object { -not $_.done }).Count
+        [void](Invoke-ModPack (Read-ModPack $dcode) @() -Files @(210) -TurnOn @())
+        $dq = @(Get-Queue | Where-Object { -not $_.done } | Select-Object -Skip $q0)
+        Check ((@($dq | ForEach-Object fileId) -join ',') -eq '210' -and ((Get-State).disabled | Where-Object name -eq 'DepOff')) "T28 only the ticked file is queued, an unticked mod stays off: $(@($dq | ForEach-Object fileId) -join ',')"
     }
     finally { & (Get-Module cpmods) { param($f) Set-Item function:script:Invoke-NexusGql $f } $origGql }
     & $nx 'PackOld' 9002 21 '2.0' (New-TestMod 'PackOld2' @{ 'archive\pc\mod\pold.archive' = 'o2' })

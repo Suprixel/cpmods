@@ -8,7 +8,7 @@ $stub = @'
 function Invoke-NexusGql([string]$Query, $Variables) {
     if ($Query -match 'modFiles\(') {
         $F = Read-JsonFile (Join-Path $script:Root 'fake-nexus.json')
-        $d = @{ legacyModsByDomain = @{ nodes = @(foreach ($m in [regex]::Matches($Query, 'modId: (\d+)\}')) { $x = $F["$($m.Groups[1].Value)"]; if ($x) { @{ modId = [int]$m.Groups[1].Value; name = $x.name } } }) } }
+        $d = @{ legacyModsByDomain = @{ nodes = @(foreach ($m in [regex]::Matches($Query, 'modId: (\d+)\}')) { $x = $F["$($m.Groups[1].Value)"]; if ($x) { @{ modId = [int]$m.Groups[1].Value; name = $x.name; summary = "About $($x.name)"; modRequirements = @{ nexusRequirements = @{ nodes = @($x.needs | ForEach-Object { @{ modId = $_ } }) } } } } }) } }
         foreach ($m in [regex]::Matches($Query, 'm(\d+): modFiles')) { $x = $F["$($m.Groups[1].Value)"]; $d["m$($m.Groups[1].Value)"] = $(if ($x) { @($x.files) } else { @() }) }
         return $d
     }
@@ -22,7 +22,9 @@ $t = $t.Replace("function Invoke-NexusGql([string]`$Query, `$Variables) {", $stu
 @{
     '9001' = @{ name = 'ModN1'; files = @(@{ fileId = 1; name = 'ModN1 main'; version = '1.0'; category = 'OLD_VERSION' }, @{ fileId = 2; name = 'ModN1 main'; version = '1.1'; category = 'MAIN' }) }
     '9002' = @{ name = 'ModN2'; files = @(@{ fileId = 19; name = 'ModN2 main'; version = '0.9'; category = 'OLD_VERSION' }, @{ fileId = 20; name = 'ModN2 main'; version = '1.0'; category = 'MAIN' }) }
-    '9005' = @{ name = 'Brand new'; files = @(@{ fileId = 50; name = 'Brand new'; version = '3.1'; category = 'MAIN' }) }
+    '9005' = @{ name = 'Brand new'; needs = @(9006, 9008); files = @(@{ fileId = 50; name = 'Brand new'; version = '3.1'; category = 'MAIN' }) }
+    '9006' = @{ name = 'Dep pack'; files = @(@{ fileId = 60; name = 'Dep pack'; version = '1.0'; category = 'MAIN' }) }
+    '9008' = @{ name = 'Dep extra'; files = @(@{ fileId = 80; name = 'Dep extra'; version = '2.0'; category = 'MAIN' }) }
 } | ConvertTo-Json -Depth 6 | Set-Content "$Sb\fake-nexus.json"
 # two Nexus mods here; codes made with the sandbox's own encoder
 $codes = pwsh -NoProfile -Command {
@@ -31,7 +33,7 @@ $codes = pwsh -NoProfile -Command {
     function Z([string]$n, [string]$f) { $d = "$Sb\src\$n"; New-Item -ItemType Directory -Force (Split-Path "$d\$f") | Out-Null; Set-Content "$d\$f" $n -NoNewline; Compress-Archive "$d\*" "$Sb\downloads\$n.zip" -Force; "$Sb\downloads\$n.zip" }
     Install-ModArchive (Z 'ModN1' 'archive\pc\mod\n1.archive') ([ordered]@{ name = 'ModN1'; version = '1.0'; source = 'nexus:9001/1'; modId = 9001; fileId = 1; fileName = 'ModN1 main' }) | Out-Null
     Install-ModArchive (Z 'ModN2' 'archive\pc\mod\n2.archive') ([ordered]@{ name = 'ModN2'; version = '1.0'; source = 'nexus:9002/20'; modId = 9002; fileId = 20; fileName = 'ModN2 main' }) | Out-Null
-    (ConvertTo-PackCode 'Night City <b>pack</b>' @(@{ modId = 9001; fileId = 2 }, @{ modId = 9002; fileId = 19 }, @{ modId = 9005; fileId = 50 }, @{ modId = 9007; fileId = 70 }) -Short).code
+    (ConvertTo-PackCode 'Night City <b>pack</b>' @(@{ modId = 9001; fileId = 2 }, @{ modId = 9002; fileId = 19 }, @{ modId = 9005; fileId = 50 }, @{ modId = 9006; fileId = 60 }, @{ modId = 9007; fileId = 70 }) -Short).code
     (ConvertTo-PackCode 'Old one' @(@{ modId = 9002; fileId = 19 })).code
 } -args $Sb
 $friend, $oldOnly = $codes
@@ -77,30 +79,45 @@ try {
     Set-Text 'pack-code' "yo here's my setup: $friend enjoy"
     [void](Click '#pane [data-act=pack-check]'); [void](WaitJs '!document.getElementById("modal").hidden')
     $mt = Js 'document.getElementById("modal").innerText'
-    Check ($mt -match 'Downloaded \(1\)' -and $mt -match 'Brand new' -and $mt -match 'another version \(2\)' -and $mt -match 'yours 1\.0, the pack.s 1\.1' -and $mt -match 'yours 1\.0, the pack.s 0\.9' -and $mt -match 'No longer on Nexus, skipped \(1\)' -and $mt -match 'Nexus file 70') 'dialog: new, two other versions, one gone (short code)'
-    Check ($mt -match 'newer in the pack' -and $mt -match 'older in the pack') 'dialog: says which side is newer'
+    Check ($mt -match 'Brand new' -and $mt -match 'Dep pack' -and $mt -match 'Dep extra' -and $mt -match 'Yours 1\.0, the pack.s 1\.1' -and $mt -match 'Yours 1\.0, the pack.s 0\.9' -and $mt -match 'No longer on Nexus, skipped \(1\)' -and $mt -match 'Nexus file 70') 'dialog: new mods, two other versions, one gone (short code)'
+    Check ($mt -match 'Newer in the pack' -and $mt -match 'Older in the pack' -and $mt -match 'Not in the modpack') 'dialog: says which side is newer and which mod the code does not list'
     Check ([bool](Js 'document.querySelector("#modal h3").textContent === "Get the modpack Night City <b>pack</b>?"')) 'dialog: the pack name is shown as text, not HTML'
-    Check ((Js 'document.querySelectorAll("#modal .choice").length') -eq 4 -and [bool](Js '/Update my mods/.test(document.querySelector("#modal .choice.rec").innerText) && document.activeElement === document.querySelector("#modal .choice.rec")')) 'dialog: Update my mods is the recommended, focused choice'
-    Check ([bool](Js 'document.querySelector("#modal [data-pick=ModN1]").checked && !document.querySelector("#modal [data-pick=ModN2]").checked')) 'dialog: only the newer one is ticked'
+    $rows = 'Array.from(document.querySelectorAll("#modal .pk-row")).map(r => (r.classList.contains("dep") ? ">" : "") + r.querySelector("[data-pk]").getAttribute("aria-label")).join(",")'
+    Check ((Js $rows) -eq 'Brand new,>Dep pack,>Dep extra,ModN1,ModN2' -and (Js 'document.querySelectorAll("#modal .pk-row.dep .pill.info").length') -eq 2) "dialog: list view, dependencies under the mod that needs them: $(Js $rows)"
+    $ck = 'const ck = n => Array.from(document.querySelectorAll("#modal [data-pk]")).filter(c => c.getAttribute("aria-label") === n);'
+    $ticks = "(() => { $ck return ['Brand new', 'Dep pack', 'Dep extra', 'ModN1', 'ModN2'].map(n => ck(n).every(c => c.checked) ? 1 : 0).join(''); })()"
+    Check ((Js $ticks) -eq '11110' -and [bool](Js '/4 of 5 mods ticked/.test(document.getElementById("pk-sum").innerText) && document.getElementById("pk-go").textContent === "Get 4 mods" && document.activeElement === document.getElementById("pk-go")')) "dialog: all new mods and the newer version ticked, not the downgrade: $(Js $ticks)"
+    [void](Js "(() => { $ck ck('Brand new')[0].click(); })()")
+    Check ((Js $ticks) -eq '00010' -and [bool](Js '/1 of 5 mods ticked/.test(document.getElementById("pk-sum").innerText)')) "pick: unticking a mod unticks its dependencies: $(Js $ticks)"
+    [void](Js "(() => { $ck ck('Dep pack')[0].click(); })()")
+    Check ((Js $ticks) -eq '01010') "pick: a dependency alone can be ticked: $(Js $ticks)"
+    [void](Js "(() => { $ck ck('Brand new')[0].click(); ck('Dep extra')[0].click(); })()")
+    Check ((Js $ticks) -eq '11010' -and [bool](Js "(() => { $ck return ck('Dep extra')[0].closest('.pk-row').querySelector('[data-pkw]').classList.contains('warn-t'); })()")) "pick: ticking the mod ticks its dependencies; one unticked again is flagged: $(Js $ticks)"
     Shot 'ui-packs-dialog.jpg'
-    [void](Click '#modal .choice.rec'); WaitJobs
+    [void](Click '#modal [data-pkv=cards]')
+    Check ((Js 'document.querySelectorAll("#modal .pk-tile").length') -eq 3 -and (Js 'document.querySelectorAll("#modal .pk-tile")[0].querySelectorAll(".pk-dep").length') -eq 2 -and (Js $ticks) -eq '11010' -and [bool](Js 'document.querySelector("#modal .pk-dep:not(.on)").classList.contains("warn-t") && /About Brand new/.test(document.querySelector("#modal .pk-tile").innerText)')) "cards: one card per mod, dependencies inside it, ticks kept: $(Js $ticks)"
+    Shot 'ui-packs-cards.jpg'
+    [void](Click '#pk-go'); WaitJobs
     $st = Api '/api/state'
     $q = @($st.queue | Where-Object { -not $_.done })
-    Check ((@($q | ForEach-Object { "$($_.fileId)=$($_.name)" }) -join ',') -eq '50=Brand new,2=ModN1') "apply: queue has the new mod and the ModN1 update, not the ModN2 downgrade: $(($q | ForEach-Object { "$($_.fileId)=$($_.name)" }) -join ', ')"
+    Check ((@($q | ForEach-Object { "$($_.fileId)=$($_.name)" }) -join ',') -eq '50=Brand new,60=Dep pack,2=ModN1') "apply: only ticked mods are queued: $(($q | ForEach-Object { "$($_.fileId)=$($_.name)" }) -join ', ')"
     $job = $st.jobs | Where-Object kind -eq 'pack' | Select-Object -First 1
-    Check ($job.status -eq 'done' -and $job.detail -match '2 download\(s\) queued, the first Nexus page is open' -and $job.detail -match '1 no longer on Nexus' -and $job.detail -match 'Restore point: Before the modpack Night City') "apply: job done: $($job.detail) $($job.error)"
+    Check ($job.status -eq 'done' -and $job.detail -match '3 download\(s\) queued, the first Nexus page is open' -and $job.detail -match '1 no longer on Nexus' -and $job.detail -match 'Restore point: Before the modpack Night City') "apply: job done: $($job.detail) $($job.error)"
+    Check ((Get-Content "$Sb\state\ui.json" -Raw) -match '"packView":"cards"') 'cards: the layout is remembered'
     Check ((Get-Content "$Sb\opened.txt" -ErrorAction SilentlyContinue | Select-Object -First 1) -match 'mods/9005\?tab=files&file_id=50') 'apply: the first queued Nexus page was requested (logged, not opened)'
     $bk = Api '/api/backups'
     Check (@($bk.points | Where-Object { $_.label -eq 'Before the modpack Night City <b>pack</b>' }).Count -eq 1 -and @($bk.settings | Where-Object { $_.reason -like 'Before the modpack*' }).Count -eq 1) 'apply: restore point and mod settings backup exist'
 
-    # only an older version in the pack: keep is the default, and keeping changes nothing
+    # only an older version in the pack: unticked, so nothing to get until it is ticked
     $jobs = @($st.jobs).Count
     Check ([bool](WaitJs '!document.querySelector("#pane [data-act=pack-check]").disabled')) 'pane: the check button comes back when the job ends'
     Set-Text 'pack-code' $oldOnly
     [void](Click '#pane [data-act=pack-check]'); [void](WaitJs '!document.getElementById("modal").hidden')
-    Check ((Js 'document.querySelectorAll("#modal .choice").length') -eq 2 -and [bool](Js '/Keep my version/.test(document.querySelector("#modal .choice.rec").innerText)')) 'dialog: pack only older -> Keep my version is recommended'
-    [void](Click '#modal .choice.rec'); Check (Toast 'Nothing changes') 'keep with nothing else: no job, says nothing changes'
-    Start-Sleep -Milliseconds 800; Check (@((Api '/api/state').jobs).Count -eq $jobs) 'keep with nothing else: no restore point job started'
+    Check ([bool](Js 'document.querySelectorAll("#modal .pk-tile").length === 1 && !document.querySelector("#modal [data-pk]").checked && document.getElementById("pk-go").disabled')) 'dialog: opens in cards; pack only older -> unticked, nothing to get'
+    [void](Click '#modal [data-pk]'); Check ([bool](Js 'document.getElementById("pk-go").textContent === "Get 1 mod" && !document.getElementById("pk-go").disabled')) 'dialog: ticking it enables the button'
+    [void](Click '#modal [data-pkv=list]'); Check ([bool](Js 'document.querySelectorAll("#modal .pk-row").length === 1 && document.querySelector("#modal [data-pk]").checked')) 'dialog: back to the list, the tick stays'
+    [void](Click '#modal [data-m=""]'); Start-Sleep -Milliseconds 800
+    Check ([bool](Js 'document.getElementById("modal").hidden') -and @((Api '/api/state').jobs).Count -eq $jobs) 'cancel: closes, no job started'
 
     # the Library menu entry opens the same pane
     [void](Invoke-Cdp 'Page.navigate' @{ url = 'http://localhost:7078/#/library' }); [void](WaitJs 'document.querySelector("#page [data-act=lib-more]")')
