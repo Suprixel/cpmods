@@ -149,7 +149,8 @@ function Update-GameLean {
     if ($run -ne $lean.run) {
         $mp = 0; [void][int]::TryParse("$((Get-UiPerf).mouse)", [ref]$mp)
         $m = $shared.mouse; $m.tries = 0; $m.retry = [datetime]::MinValue
-        $m.want = if ($run) { if ($mp -gt 0) { $mp } } elseif (Test-Path -LiteralPath $mouseFile) { 'back' }
+        # closed while a switch still runs: mouse.json comes only after the mouse took it, so ask for 'back' anyway
+        $m.want = if ($run) { if ($mp -gt 0) { $mp } } elseif ($m.busy -or (Test-Path -LiteralPath $mouseFile)) { 'back' }
     }
     Start-MouseSync
     if ($run -eq $lean.run) { return }

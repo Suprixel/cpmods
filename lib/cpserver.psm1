@@ -832,7 +832,7 @@ function Get-CpRateHz([int]$B, [bool]$Ext) {
     $null
 }
 
-# First Logitech device with onboard profiles and an adjustable report rate (a mouse).
+# First Logitech mouse with onboard profiles and an adjustable report rate (G keyboards can have both, so the device type is checked).
 # The slot that answered last time (else receiver slot 1) waits 2 s: a sleeping mouse wakes on the request.
 # Other slots and the cable (FF) get 300 ms: a receiver reports empty slots on another channel, so they just time out.
 function Open-CpMouse {
@@ -848,9 +848,10 @@ function Open-CpMouse {
                 if (-not $p) { continue }
                 $x = $h.Feature($dev, 0x8061, 500)
                 if (-not $x -and -not $h.Feature($dev, 0x8060, 500)) { continue }
+                $nf = $h.Feature($dev, 0x0005, 500)
+                if ($nf -and $h.Call($dev, $nf, 2, $null, 300)[0] -ne 3) { continue }   # 0x0005 getDeviceType: 3 = mouse
                 $script:MouseSlot = $dev
                 $name = ''
-                $nf = $h.Feature($dev, 0x0005, 500)
                 if ($nf) {
                     $len = $h.Call($dev, $nf, 0, $null, 300)[0]
                     for ($o = 0; $o -lt $len; $o += 16) { $name += [Text.Encoding]::ASCII.GetString($h.Call($dev, $nf, 1, [byte[]]@($o), 300)) }

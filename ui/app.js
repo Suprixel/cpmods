@@ -1577,8 +1577,11 @@
     return `<div class="setting"><div class="setting-text"><b>Mouse profile while playing</b><span>Logitech mice with onboard profiles (Onboard Memory Manager or G HUB). Use one with a lower polling rate if 8000 Hz drops your fps. The profile that was active comes back when the game closes.</span></div><select data-perf="mouse" aria-label="Mouse profile while playing">${opt(list, P.mouse)}</select></div>
       <div class="perf-now">${now}<button class="link-btn small" data-act="mouse-refresh">Check again</button></div>`;
   }
+  // a redraw while a lookup runs must not start another (a mouse that is off takes about 4 s to rule out)
+  let mouseBusy = false;
   async function loadMouse() {
-    try { S.mouse = await api('/api/mouse'); } catch (e) { S.mouse = { error: e.message }; }
+    mouseBusy = true;
+    try { S.mouse = await api('/api/mouse'); } catch (e) { S.mouse = { error: e.message }; } finally { mouseBusy = false; }
     const el = $('#mouse-set');
     if (el) el.innerHTML = mouseHtml();
   }
@@ -1629,8 +1632,10 @@
         <div class="du-clean">${free || sp.old.length ? `<span>${sp.free.length ? `<b>${plural(sp.free.length, 'download')}</b> (${fmtSize(sp.freeBytes)}) no mod uses any more.` : 'Every download is used by a mod.'}${sp.old.length ? ` ${plural(sp.old.length, 'older version')} (${fmtSize(sp.oldBytes)}) kept for going back.` : ''}</span><button class="btn sm" data-act="disk-clean">Free space...</button>` : '<span class="dim small">Nothing to clean up: every download belongs to a mod.</span>'}<button class="btn sm ghost" data-act="disk-refresh">Measure again</button></div>
       </div>`;
   }
+  let diskBusy = false;
   async function loadDisk() {
-    try { S.disk = await api('/api/storage'); } catch (e) { S.disk = { error: e.message }; }
+    diskBusy = true;
+    try { S.disk = await api('/api/storage'); } catch (e) { S.disk = { error: e.message }; } finally { diskBusy = false; }
     const el = $('#disk-now');
     if (el) el.innerHTML = diskHtml();
   }
@@ -1707,7 +1712,7 @@
         <div class="sx-body" id="sxb-${x.k}"${on ? '' : ' hidden'}>${on ? sectionBody(x.k) : ''}</div></section>`;
     }).join('')}</div></div>`;
     // live memory numbers only while their section is open (one WMI query each time); disk space once per opening
-    if (open.has('perf')) { loadPerfNow(); if (!S.disk) loadDisk(); if (!S.mouse) loadMouse(); }
+    if (open.has('perf')) { loadPerfNow(); if (!S.disk && !diskBusy) loadDisk(); if (!S.mouse && !mouseBusy) loadMouse(); }
   }
   function toggleSection(k, force) {
     const open = setOpen(), on = force != null ? force : !open.has(k);
