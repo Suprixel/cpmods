@@ -953,25 +953,8 @@ public static class CpRdar {
 '@
 }
 
-# Resource path hashes from a Cyberpunk .archive (RDAR) index
-function Get-ArchiveHashes([string]$Path) {
-    try { Add-CpRdarType; return , [CpRdar]::Hashes($Path) } catch { }
-    $fs = [IO.File]::Open($Path, 'Open', 'Read', 'ReadWrite')
-    try {
-        $br = [IO.BinaryReader]::new($fs)
-        if ([Text.Encoding]::ASCII.GetString($br.ReadBytes(4)) -ne 'RDAR') { return , [uint64[]]@() }
-        [void]$br.ReadUInt32()
-        $fs.Position = [long]$br.ReadUInt64() + 16
-        $n = [int]$br.ReadUInt32()
-        if ($n -le 0 -or $n -gt 2000000) { return , [uint64[]]@() }
-        [void]$br.ReadUInt32(); [void]$br.ReadUInt32()
-        $buf = $br.ReadBytes($n * 56)
-        $out = [uint64[]]::new($n)
-        for ($i = 0; $i -lt $n; $i++) { $out[$i] = [BitConverter]::ToUInt64($buf, $i * 56) }
-        , $out
-    }
-    finally { $fs.Dispose() }
-}
+# Resource path hashes from a Cyberpunk .archive (RDAR) index; an unreadable archive has none
+function Get-ArchiveHashes([string]$Path) { Add-CpRdarType; try { , [CpRdar]::Hashes($Path) } catch { , [uint64[]]@() } }
 
 function Get-CompatIgnore {
     $f = Join-Path (Get-CpPaths).state 'compat-ignore.json'

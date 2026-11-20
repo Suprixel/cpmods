@@ -44,6 +44,8 @@ function Get-NormName([string]$N) { ("$N".ToLower() -replace '\bv?\d+(\.\d+)+[a-
 function Read-JsonFile([string]$Path) {
     for ($i = 0; ; $i++) {
         try { return ([IO.File]::ReadAllText($Path) | ConvertFrom-Json -AsHashtable) }
+        # a missing file is no lock that clears: fail now instead of after 20 retries (1.3 s)
+        catch [IO.FileNotFoundException], [IO.DirectoryNotFoundException] { throw }
         catch [IO.IOException] { if ($i -ge 20) { throw }; Start-Sleep -Milliseconds 50 }
     }
 }

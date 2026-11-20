@@ -111,6 +111,7 @@ function Get-RestorePlan([string]$Id) {
 
 function Invoke-RestorePoint([string]$Id, $Job) {
     Assert-GameReady
+    if (Get-BisectState) { throw 'Troubleshooting is running: finish it first, then go back to a restore point' }
     $plan = Get-RestorePlan $Id
     $p = @(Get-RestorePoints) | Where-Object { $_.id -eq $Id } | Select-Object -First 1
     [void](Save-RestorePoint 'auto' "Before going back to $(([datetime]$p.at).ToString('d MMM HH:mm', [Globalization.CultureInfo]::InvariantCulture))")
@@ -473,9 +474,9 @@ function Import-ModSettings([string]$Base64) {
         $man = Read-SettingsManifest $tmp
         $bad = @(@($man.files) | Where-Object { -not (Test-SettingsPath $_.path) })
         if ($bad) { throw "It holds files outside mod folders ($($bad[0].path))" }
-        # someone else's file: a CET mod's init.lua or a .reds script is the mod's code, not a setting; left out
+        # someone else's file: any .lua (CET mods load more than init.lua) or .reds script is mod code, not a setting; left out
         $all = @($man.files)
-        $man.files = @($all | Where-Object { "$($_.path)" -notmatch '(?i)(^|[\\/])init\.lua$|\.reds$' })
+        $man.files = @($all | Where-Object { "$($_.path)" -notmatch '(?i)\.(lua|reds)$' })
         $code = $all.Count - @($man.files).Count
         $man.kind = 'imported'; $man.reason = 'Imported file'
         $z = [IO.Compression.ZipFile]::Open($tmp, 'Update')

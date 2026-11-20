@@ -11,7 +11,7 @@ try {
     Copy-Item (Join-Path (Split-Path $PSScriptRoot) 'lib\*.psm1') "$sb\lib"
     @{ gamePath = $g; nexusGame = 'cyberpunk2077'; steamManifest = '' } | ConvertTo-Json | Set-Content "$sb\config.json"
     '[]' | Set-Content "$sb\frameworks.json"; 'exe' | Set-Content "$g\bin\x64\Cyberpunk2077.exe"
-    Import-Module "$sb\lib\cpmods.psm1", "$sb\lib\cpsafety.psm1" -Force -DisableNameChecking
+    Import-Module "$sb\lib\cpmods.psm1", "$sb\lib\cpinsight.psm1", "$sb\lib\cpsafety.psm1" -Force -DisableNameChecking
     Set-CpContext 'test' $true
     if ((Get-CpPaths).game -ne $g) { throw 'not isolated' }
 

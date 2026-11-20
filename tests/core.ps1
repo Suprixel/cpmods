@@ -201,6 +201,8 @@ try {
     $b = Get-BisectState; $on = @((Get-State).mods | ForEach-Object { $_.name })
     Check ($b.outcome -eq 'found' -and $b.culprit -eq 'K3') "T17 found K3: $($b.outcome) $($b.culprit)"
     Check ($on -contains 'K1' -and $on -contains 'K2' -and $on -contains 'K4' -and $on -notcontains 'K3') "T17 the others are on, K3 off: $($on -join ', ')"
+    $err = try { [void](Invoke-RestorePoint (Save-RestorePoint 'manual' 'T17').id); '' } catch { $_.Exception.Message }
+    Check ($err -like 'Troubleshooting is running*') "T17 going back to a restore point waits until troubleshooting ends: $err"
     [void](Stop-Bisect -KeepCulprit $true)
     Check (-not (Get-BisectState) -and ((Get-State).disabled | Where-Object name -eq 'K3')) 'T17 finished, K3 stays off'
 
@@ -490,13 +492,18 @@ try {
     $zs = Join-Path $Sb 'friend-settings.zip'; $cetX = 'bin/x64/plugins/cyber_engine_tweaks/mods/X'
     $zw = [IO.Compression.ZipFile]::Open($zs, 'Create')
     try {
-        foreach ($n in "$cetX/init.lua", "$cetX/config.json", 'r6/scripts/X/config.reds') { $sw = [IO.StreamWriter]::new($zw.CreateEntry($n).Open()); $sw.Write('x'); $sw.Dispose() }
+        foreach ($n in "$cetX/init.lua", "$cetX/modules/util.lua", "$cetX/config.json", 'r6/scripts/X/config.reds') { $sw = [IO.StreamWriter]::new($zw.CreateEntry($n).Open()); $sw.Write('x'); $sw.Dispose() }
         $sw = [IO.StreamWriter]::new($zw.CreateEntry('manifest.json').Open())
-        $sw.Write((ConvertTo-Json @{ format = 'cpmods-settings'; version = 1; at = (Get-Date).ToString('s'); kind = 'manual'; reason = ''; files = @(@{ path = "$cetX/init.lua" }, @{ path = "$cetX/config.json" }, @{ path = 'r6/scripts/X/config.reds' }) } -Depth 4)); $sw.Dispose()
+        $sw.Write((ConvertTo-Json @{ format = 'cpmods-settings'; version = 1; at = (Get-Date).ToString('s'); kind = 'manual'; reason = ''; files = @(@{ path = "$cetX/init.lua" }, @{ path = "$cetX/modules/util.lua" }, @{ path = "$cetX/config.json" }, @{ path = 'r6/scripts/X/config.reds' }) } -Depth 4)); $sw.Dispose()
     }
     finally { $zw.Dispose() }
     $imp = Import-ModSettings ([Convert]::ToBase64String([IO.File]::ReadAllBytes($zs)))
-    Check ($imp.count -eq 1 -and $imp.code -eq 2) "T32 a friend's settings zip keeps config.json and leaves out init.lua and .reds ($($imp.count) kept, $($imp.code) left out)"
+    Check ($imp.count -eq 1 -and $imp.code -eq 3) "T32 a friend's settings zip keeps config.json and leaves out every .lua and .reds ($($imp.count) kept, $($imp.code) left out)"
+
+    Write-Host '--- T36: nxm links from the browser'
+    $l = Resolve-NxmLink 'nxm://cyberpunk2077/mods/107/files/12345?key=ab%2Fc&expires=1700000000&user_id=1'
+    Check ($l.modId -eq 107 -and $l.fileId -eq 12345 -and $l.key -eq 'ab/c' -and $l.expires -eq '1700000000') "T36 a Nexus link gives mod, file, key and expiry: $($l | ConvertTo-Json -Compress)"
+    foreach ($bad in 'nxm://skyrimspecialedition/mods/1/files/2?key=a&expires=1', 'nxm://cyberpunk2077/mods/x/files/2?key=a', 'https://example.com/?nxm://cyberpunk2077/mods/1/files/2?key=a', '') { $err = try { [void](Resolve-NxmLink $bad); '' } catch { 'refused' }; Check ($err -eq 'refused') "T36 link refused: '$bad'" }
 
     Write-Host '--- T34: mouse onboard profiles: directory and polling rate bytes (as read from a PRO X 2)'
     $dir = [byte[]](0, 1, 1, 0, 0, 2, 0, 0, 1, 0, 1, 0) + [byte[]](@(0xFF) * 20)

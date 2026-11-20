@@ -95,6 +95,8 @@ try {
             Write-Note "Checked $($r.checkedLogs) logs."
         }
         'nxm' {
+            # a link the app would refuse (another game, broken) shows its error now, not after 15 s of retries
+            [void](Resolve-NxmLink $Arg)
             if ($Inline) { Invoke-InlineNxm $Arg; Start-Sleep -Seconds 3; break }
             if (Send-ToServer $Arg) { break }
             Start-CpServer -Open
